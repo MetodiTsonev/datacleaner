@@ -1,13 +1,10 @@
-"""The finding contract.
+"""What a check returns.
 
-What a check returns. Kept in its own module so `checks.py` and `detect.py` can
-both depend on it without depending on each other.
+Its own module so checks.py and detect.py can both import it without a cycle.
 
-A finding carries not just "this is wrong" but a **suggested repair** where the
-system knows one. That link is what makes the system prescriptive rather than
-merely descriptive, and it is what the задание means by *автоматизирани процедури*.
-A finding with no suggestion is shown as such rather than hidden -- some defects
-need a human decision, and some rules cannot judge the column they ran on.
+A finding carries a suggested repair where we know one - that link is what makes this
+prescriptive rather than just descriptive. No suggestion is shown as such, not hidden:
+some defects need a human, and some rules can't judge the column they ran on.
 """
 
 from __future__ import annotations
@@ -15,12 +12,10 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-#: Ordered worst first, so `sorted` puts what matters on top.
-SEVERITIES = ("critical", "high", "medium", "low", "info")
+SEVERITIES = ("critical", "high", "medium", "low", "info")  # worst first
 
-#: The four mandated theoretical topics, plus `structure` for defects belonging to
-#: none of them. Carried on every finding so coverage per topic can be reported
-#: rather than asserted -- see writing/00-zadanie.md.
+# The four mandated topics, plus structure for what belongs to none of them. On every
+# finding so topic coverage can be reported rather than claimed.
 TOPICS = ("missing", "anomalies", "duplicates", "features", "structure")
 
 

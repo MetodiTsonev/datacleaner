@@ -1,20 +1,11 @@
-"""Stage 2 - profiling: what is actually in each column.
+"""What's actually in each column.
 
-Everything downstream depends on this stage, because the задание requires the
-system to accept *arbitrary* raw files. Nothing may be hardcoded about a
-particular dataset, so which repair applies to a column has to be decided from
-what the column contains.
+The dtype isn't enough to pick a repair: a column of digits is int64 whether it holds
+ages or postcodes, and you mustn't take the median of a postcode. So each column gets
+a *semantic* type on top of the dtype, and that's what later stages branch on.
 
-pandas' own dtype is not enough for that decision. A CSV column of digits arrives
-as `int64`, but so does a column of postcodes, and a postcode is not a quantity --
-you must not take its median. A column of `"yes"`/`"no"` arrives as `object`, the
-same dtype as free text. So this module assigns each column a **semantic type**
-above the dtype, and that is what later stages branch on.
-
-The thresholds below are deliberately conservative and stated as constants rather
-than buried in conditionals, because every one of them is a judgement call that
-has to be defensible. They are explained in
-writing/04-implementation/01-loader-profile.md.
+Thresholds are named constants rather than buried in conditionals - each one is a
+judgement call. Reasoning in writing/04-implementation/01-loader-profile.md.
 """
 
 from __future__ import annotations
@@ -26,70 +17,37 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-#: Share of non-null values that must parse as numbers before a text column is
-#: treated as numeric. Below 1.0 so that a mostly-numeric column with a few stray
-#: entries is still recognised -- those strays are a finding, not a reason to give
-#: up on the column.
-NUMERIC_THRESHOLD = 0.95
+from src.text import as_text, plain, real_values
 
-#: Same idea for dates. Higher, because date parsing is far more willing to accept
-#: nonsense: pandas will read "12" as a date if allowed to.
+# Below 1.0 so a mostly-numeric column with a few strays is still numeric - the
+# strays are a finding, not a reason to give up on the column.
+NUMERIC_THRESHOLD = 0.95
+# Higher: date parsing accepts far more nonsense.
 DATETIME_THRESHOLD = 0.98
 
-#: A column is categorical if it has at most this many distinct values...
+# Categorical if few distinct values, OR few relative to the rows. The share rule is
+# what makes the absolute one scale; the 0.5 guard stops 50-in-50-rows counting.
 CATEGORICAL_MAX_DISTINCT = 50
-#: However many distinct values it has, a column whose values are this unique
-#: cannot be a set of labels -- it is text or an identifier.
+CATEGORICAL_MAX_DISTINCT_SHARE = 0.05
 CATEGORICAL_MAX_SHARE_OF_ROWS = 0.5
 
-#: ...or if its distinct values are at most this share of its rows. The second
-#: rule is what makes the first scale: 50 distinct values in 100 rows is not a
-#: category, 50 in 50,000 rows plainly is.
-CATEGORICAL_MAX_DISTINCT_SHARE = 0.05
-
-#: At or below this many distinct whole numbers, a numeric column *might* be a
-#: code rather than a quantity. Deliberately used only to annotate, never to
-#: reclassify -- see `_infer_type`. Kept small: 16 distinct values of
-#: `education_num` are years of schooling, a real quantity.
+# Annotate only, never reclassify: age has 74 distinct values in 48,842 rows and is
+# obviously a quantity. Real code columns (postcodes) have HIGH cardinality anyway.
 NUMERIC_CODE_HINT_DISTINCT = 10
 
-#: Above this share of distinct values, a column identifies rows rather than
-#: describing them. Such columns must never become model features: an identifier
-#: correlated with the target by accident of collection order is a classic
-#: leakage route.
-#:
-#: The share is measured against the number of **distinct rows**, not all rows. An
-#: identifier is unique per record, and a duplicated record legitimately repeats
-#: it -- so counting all rows makes a real identifier look less unique the dirtier
-#: the file is, which is precisely backwards.
+# Measured against distinct ROWS, not all rows: an id is unique per record, and a
+# duplicated record repeats it, so counting all rows gets it backwards.
 IDENTIFIER_MIN_DISTINCT_SHARE = 0.95
 
-#: Mean character length above which a non-categorical text column is free text
-#: rather than a short label.
-TEXT_MIN_MEAN_LENGTH = 40
+TEXT_MIN_MEAN_LENGTH = 40  # mean chars above which a label becomes prose
 
-#: Values that *look* like data but mean "missing". Defined here, in the first
-#: stage that needs them, and imported by `detect` and `clean`. Profiling has to
-#: know about them: a numeric column containing one "N/A" would otherwise profile
-#: as categorical, and would then be filled with a mode instead of a median.
-DISGUISED_TOKENS = frozenset(
-    {
-        "?", "??", "n/a", "n\\a", "na", "null", "none", "nil", "nan",
-        "-", "--", "---", ".", "unknown", "unspecified", "missing", "",
-        "-999", "-9999", "999", "9999",
-    }
-)
-
-#: A value must look date-shaped before `to_datetime` is allowed near it. Two or
-#: more of the same separator, or a bare 8-digit date. Without this, `pd.to_datetime`
-#: accepts "1,50" -- so a European price column, where the comma is the decimal
-#: separator, was being classified as dates.
+# to_datetime accepts "1,50", so a European price column read as dates. Require a
+# date shape first: two matching separators, or eight digits.
 _DATE_SHAPED = re.compile(
     r"^\s*(?:\d{8}|\d{1,4}([-/.])\d{1,2}\1\d{1,4}"
     r"|\d{1,4}([-/.])\d{1,2}\2\d{1,4}[ T].*)\s*$"
 )
 
-#: Recognised as booleans regardless of case.
 BOOLEAN_SETS = (
     {"true", "false"}, {"yes", "no"}, {"y", "n"},
     {"1", "0"}, {"t", "f"}, {"да", "не"},
@@ -134,13 +92,9 @@ class ColumnProfile:
 def profile_column(
     series: pd.Series, *, n_distinct_rows: int | None = None
 ) -> ColumnProfile:
-    """Describe one column and assign it a semantic type.
+    """Describe one column and give it a semantic type.
 
-    Args:
-        series: the column.
-        n_distinct_rows: how many distinct rows the table has. Used only for
-            identifier detection -- see `IDENTIFIER_MIN_DISTINCT_SHARE`. Defaults
-            to the column length, which is right for a standalone column.
+    n_distinct_rows is only for identifier detection; defaults to the column length.
     """
     n_rows = len(series)
     present = series.dropna()
@@ -168,7 +122,7 @@ def profile_column(
         top_value=top_value,
         top_share=round(top_share, 2),
         stats=_stats(present, semantic),
-        examples=[_plain(v) for v in present.unique()[:5]],
+        examples=[plain(v) for v in present.unique()[:5]],
     )
 
 
@@ -179,7 +133,7 @@ def _infer_type(
     n_rows: int,
     n_distinct_rows: int,
 ) -> tuple[str, str]:
-    """Assign a semantic type. Order matters: cheapest and most certain first."""
+    """Order matters: cheapest and most certain first."""
     if len(present) == 0:
         return "empty", "every value is missing"
     if distinct == 1:
@@ -207,16 +161,15 @@ def _infer_type(
     if pd.api.types.is_datetime64_any_dtype(series):
         return "datetime", ""
 
-    as_text = present.astype("string").str.strip()
+    text = as_text(present)
 
-    if distinct == 2 and set(as_text.str.lower().unique()) in BOOLEAN_SETS:
-        return "boolean", f"two values: {sorted(as_text.unique())}"
+    if distinct == 2 and set(text.str.lower().unique()) in BOOLEAN_SETS:
+        return "boolean", f"two values: {sorted(text.unique())}"
 
-    # Judge the *real* values. A column of numbers with a few "?" in it is a
-    # numeric column with disguised blanks, not a categorical column, and calling
-    # it categorical here would get it mode-filled later instead of median-filled.
-    real = as_text[~as_text.str.lower().isin(DISGUISED_TOKENS)]
-    n_disguised = len(as_text) - len(real)
+    # Judge the real values only. A numeric column with a few "?" in it is numeric
+    # with blanks, not categorical -- otherwise it gets mode-filled, not median-filled.
+    real = real_values(present)
+    n_disguised = len(text) - len(real)
     disguised_note = (
         f"{n_disguised} value(s) look like disguised blanks and were ignored when "
         "deciding the type"
@@ -264,13 +217,7 @@ def _infer_type(
 
 
 def _looks_categorical(distinct: int, n_rows: int) -> bool:
-    """Whether the distinct values look like a set of labels.
-
-    Two rules, and a guard. The absolute rule catches ordinary categories; the
-    share rule lets it scale to large tables. The guard matters: without it, 50
-    distinct values in 50 rows satisfies the absolute rule, so a small column of
-    free text would be called categorical.
-    """
+    """Do the distinct values look like a set of labels?"""
     if n_rows == 0:
         return False
     share = distinct / n_rows
@@ -283,19 +230,13 @@ def _looks_categorical(distinct: int, n_rows: int) -> bool:
 
 
 def _is_integral(present: pd.Series) -> bool:
-    """True when every value is a whole number, floats included."""
+    """Every value a whole number, floats included."""
     values = pd.to_numeric(present, errors="coerce").dropna()
     return bool(len(values)) and bool(np.all(np.mod(values.to_numpy(float), 1) == 0))
 
 
 def _datetime_share(as_text: pd.Series) -> float:
-    """Share of values pandas can read as dates.
-
-    Two guards, both earned. A mostly-numeric column is rejected outright, because
-    `to_datetime` will read bare integers as dates. And every value must look
-    date-shaped first -- `to_datetime` accepts "1,50", which meant a European price
-    column, where the comma is the decimal separator, was classified as dates.
-    """
+    """Share pandas can read as dates. Both guards are earned - see _DATE_SHAPED."""
     if pd.to_numeric(as_text, errors="coerce").notna().mean() > 0.5:
         return 0.0
     shaped = as_text.str.match(_DATE_SHAPED, na=False)
@@ -309,7 +250,7 @@ def _datetime_share(as_text: pd.Series) -> float:
 
 
 def _stats(present: pd.Series, semantic: str) -> dict[str, float]:
-    """Numeric summary, only where it means something."""
+    """Stats, only where they mean something."""
     if semantic == "numeric":
         values = pd.to_numeric(present, errors="coerce").dropna()
         if values.empty:
@@ -325,7 +266,7 @@ def _stats(present: pd.Series, semantic: str) -> dict[str, float]:
             "pct_zero": round(100.0 * float((values == 0).mean()), 2),
         }
     if semantic in {"text", "categorical"}:
-        lengths = present.astype("string").str.len()
+        lengths = as_text(present).str.len()
         return {
             "mean_length": round(float(lengths.mean()), 1),
             "max_length": float(lengths.max()),
@@ -334,14 +275,11 @@ def _stats(present: pd.Series, semantic: str) -> dict[str, float]:
 
 
 def profile_frame(frame: pd.DataFrame) -> list[ColumnProfile]:
-    """Profile every column, in the frame's own column order.
+    """Every column, in the frame's own order.
 
-    Raises:
-        ValueError: if two columns share a name. `frame["Amount"]` then returns a
-            DataFrame rather than a Series, and every operation expecting one column
-            fails with pandas' "truth value of a Series is ambiguous" -- an error
-            that says nothing about the actual problem. Reading through
-            `src.loader.read_table` makes names unique and reports the change.
+    Raises ValueError on duplicate names: frame["Amount"] would return a DataFrame and
+    everything downstream would fail with an error that says nothing useful.
+    read_table makes names unique.
     """
     labels = [str(c) for c in frame.columns]
     duplicated = sorted({c for c in labels if labels.count(c) > 1})
@@ -360,7 +298,7 @@ def profile_frame(frame: pd.DataFrame) -> list[ColumnProfile]:
 
 
 def as_table(profiles: list[ColumnProfile]) -> pd.DataFrame:
-    """Profiles as a display table for the UI and the report."""
+    """Display table for the UI and the report."""
     rows = []
     for p in profiles:
         rows.append(
@@ -371,7 +309,7 @@ def as_table(profiles: list[ColumnProfile]) -> pd.DataFrame:
                 "missing": p.n_missing,
                 "missing %": round(p.pct_missing, 2),
                 "distinct": p.n_distinct,
-                "top value": _plain(p.top_value),
+                "top value": plain(p.top_value),
                 "top %": p.top_share or None,
                 "skew": round(p.stats["skew"], 2) if "skew" in p.stats else None,
                 "note": p.note,
@@ -381,15 +319,8 @@ def as_table(profiles: list[ColumnProfile]) -> pd.DataFrame:
 
 
 def type_counts(profiles: list[ColumnProfile]) -> dict[str, int]:
-    """How many columns of each semantic type, for the overview."""
+    """Column counts per semantic type."""
     counts: dict[str, int] = {}
     for p in profiles:
         counts[p.semantic_type] = counts.get(p.semantic_type, 0) + 1
     return {t: counts[t] for t in SEMANTIC_TYPES if t in counts}
-
-
-def _plain(value: Any) -> Any:
-    """Convert numpy scalars to plain Python so Streamlit and JSON can hold them."""
-    if value is None or (isinstance(value, float) and pd.isna(value)):
-        return None
-    return value.item() if hasattr(value, "item") else value

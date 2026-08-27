@@ -15,12 +15,12 @@ import pytest
 
 from src.loader import read_table
 from src.profile import (
-    DISGUISED_TOKENS,
     as_table,
     profile_column,
     profile_frame,
     type_counts,
 )
+from src.text import DISGUISED_TOKENS
 
 CENSUS = Path(__file__).parent.parent / "data" / "input" / "adult-census.csv"
 

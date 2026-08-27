@@ -1,20 +1,8 @@
-"""Stage 1 - reading the input file.
+"""Reading the input file.
 
-Two things here are less trivial than they look, and both come from the задание's
-requirement that the system accept *arbitrary* raw files rather than known ones.
-
-**Encoding is declared, not assumed.** `pd.read_csv` defaults to UTF-8 and raises
-on the first byte it cannot decode. Real files are often not UTF-8: a file
-exported from Excel on a Western European machine is usually cp1252, where the
-pound sign is byte 0xA3 -- invalid UTF-8. Guessing silently would be worse than
-failing, so we try a short ordered list and *record which one worked*, so the
-choice appears in the report rather than being buried.
-
-**Delimiter is sniffed for CSV.** Semicolon-separated files are the norm in
-locales where the comma is the decimal separator, which includes Bulgarian Excel.
-A semicolon file read with a comma delimiter yields a single column containing
-the whole row -- no error, just a useless table. We check the header line and
-pick whichever candidate splits it into the most fields.
+Everything here exists because the app has to take files it has never seen. What's
+detected is always reported, never applied silently: encoding, delimiter, whether
+there's a header, and how many junk lines sat above it.
 """
 
 from __future__ import annotations
@@ -26,21 +14,15 @@ from typing import Any, BinaryIO
 
 import pandas as pd
 
-#: Tried in order. UTF-8 first because it is correct and most common; cp1252 next
-#: because it is what Excel produces on Western European systems; latin-1 last
-#: because it decodes *any* byte sequence and therefore never fails -- which makes
-#: it a usable fallback but a meaningless success, so it is reported when used.
+# latin-1 last on purpose: it decodes any byte sequence, so it never fails and its
+# success proves nothing. We report when it was used.
 ENCODINGS = ("utf-8", "cp1252", "latin-1")
 
 #: Candidate CSV delimiters, most likely first.
 DELIMITERS = (",", ";", "\t", "|")
 
-#: How many lines to examine when looking for junk above the header.
 PREAMBLE_SCAN_LINES = 20
-
-#: The header is accepted only if this many following rows agree on the field count,
-#: so a genuine one-column file is not mistaken for a preamble.
-PREAMBLE_CONFIRM_ROWS = 3
+PREAMBLE_CONFIRM_ROWS = 3  # so a genuine one-column file isn't read as a preamble
 
 CSV_SUFFIXES = {".csv", ".tsv", ".txt"}
 EXCEL_SUFFIXES = {".xlsx", ".xls", ".xlsm"}
@@ -82,10 +64,9 @@ class LoadResult:
 
 
 def sniff_delimiter(sample: str) -> str:
-    """Pick the delimiter that splits the first line into the most fields.
+    """Whichever candidate splits the first line into the most fields.
 
-    Preferred over `csv.Sniffer` alone, which raises on ambiguous input; this
-    always returns something and falls back to a comma.
+    csv.Sniffer raises on ambiguous input; we always need an answer.
     """
     first = sample.splitlines()[0] if sample.splitlines() else ""
     if not first:
@@ -99,17 +80,11 @@ def sniff_delimiter(sample: str) -> str:
 
 
 def sniff_preamble(text: str, delimiter: str) -> int:
-    """How many junk lines sit above the real header.
+    """Junk lines above the real header - a title row, a blank row.
 
-    Spreadsheet exports routinely begin with a title row and a blank row before the
-    header: read naively, the first column is then named after the report title,
-    every column becomes text, and the table is short by however many rows were
-    consumed. Nothing raises.
-
-    The rule is deliberately conservative. The real header is taken to be the first
-    line whose field count matches the count that the following lines agree on. If
-    the very first line already matches, there is no preamble -- which is the normal
-    case and must stay free of false positives.
+    The header is the first line whose field count matches what the lines below
+    agree on. If line one already matches there's no preamble, which is the normal
+    case and has to stay free of false positives.
     """
     # Counted with csv.reader, not by splitting lines: a quoted value containing a
     # newline makes one logical row span two physical lines, and splitting on
@@ -139,6 +114,79 @@ def sniff_preamble(text: str, delimiter: str) -> int:
         if following and all(c == settled for c in following):
             return index
     return 0
+
+
+def sniff_has_header(text: str, delimiter: str, *, skip: int = 0) -> bool:
+    """Whether row one is column names or data.
+
+    The signal is a type mismatch: a header cell is text, a data cell in a numeric
+    column is a number. So if any first-row cell is numeric and its column is mostly
+    numeric, that row is data.
+
+    Biased toward True. Reading a header as data destroys a row and still looks like
+    a valid table; the other way round only costs readable names.
+    """
+    from io import StringIO
+
+    reader = csv.reader(StringIO(text), delimiter=delimiter)
+    rows = []
+    for index, row in enumerate(reader):
+        if index < skip:
+            continue
+        rows.append(row)
+        if len(rows) > PREAMBLE_CONFIRM_ROWS + 1:
+            break
+    if len(rows) < 3:
+        return True
+
+    first, body = rows[0], rows[1:]
+    width = min(len(first), min(len(r) for r in body))
+    for column in range(width):
+        head = first[column].strip()
+        if not head or not _is_number(head):
+            continue
+        below = [r[column].strip() for r in body if column < len(r)]
+        numeric_below = sum(1 for v in below if v and _is_number(v))
+        if below and numeric_below / len(below) >= 0.5:
+            return False
+    return True
+
+
+def _is_number(value: str) -> bool:
+    try:
+        float(value.replace(" ", "").replace(",", "."))
+    except ValueError:
+        return False
+    return True
+
+
+def probe_header(source: str | Path | BinaryIO, *, sample_bytes: int = 65_536) -> bool:
+    """sniff_has_header on a cheap prefix, so the UI can set its default before the
+    full read. Leaves an uploaded buffer rewound. True on Excel or on failure."""
+    name = str(getattr(source, "name", None) or source)
+    if Path(name).suffix.lower() in EXCEL_SUFFIXES:
+        return True
+    try:
+        if hasattr(source, "read"):
+            if hasattr(source, "seek"):
+                source.seek(0)
+            raw = source.read(sample_bytes)
+            if hasattr(source, "seek"):
+                source.seek(0)
+            raw = raw.encode("utf-8") if isinstance(raw, str) else raw
+        else:
+            # `source`, not `name`: for a Path, `.name` is only the final component,
+            # so opening it looked in the working directory instead. The first version
+            # of this function did exactly that, and the broad `except` below turned
+            # the resulting FileNotFoundError into a confident wrong answer.
+            with Path(source).open("rb") as handle:  # type: ignore[arg-type]
+                raw = handle.read(sample_bytes)
+        text, _ = _decode(raw, None)
+        delimiter = sniff_delimiter(text[:8192])
+        return sniff_has_header(text, delimiter, skip=sniff_preamble(text, delimiter))
+    except (OSError, UnicodeDecodeError, csv.Error):
+        # Genuinely cannot tell. Assume a header, which is the recoverable direction.
+        return True
 
 
 def read_table(
@@ -202,6 +250,14 @@ def read_table(
 
         from io import StringIO
 
+        if has_header and not sniff_has_header(text, used_delimiter, skip=skipped):
+            notes.append(
+                "The first row looks like data, not column names: some of its values "
+                "are numbers in columns that are otherwise numeric. If the column "
+                "names below are actually values, untick 'First row contains column "
+                "names'."
+            )
+
         frame = pd.read_csv(
             StringIO(text),
             sep=used_delimiter,
@@ -247,12 +303,11 @@ def read_table(
 
 
 def make_names_unique(names: list[str]) -> tuple[list[str], list[tuple[str, str]]]:
-    """Give every column a distinct name, reporting what had to change.
+    """Distinct names, plus what changed.
 
-    Duplicate names are not a cosmetic problem: `frame["Amount"]` returns a
-    *DataFrame* rather than a Series when two columns share the name, so every
-    downstream operation that expects one column raises "the truth value of a Series
-    is ambiguous" -- including the check whose job is to report the duplication.
+    Not cosmetic: with two columns called Amount, frame["Amount"] returns a DataFrame
+    and everything downstream dies on "truth value of a Series is ambiguous" -
+    including the check meant to report it.
     """
     seen: dict[str, int] = {}
     out: list[str] = []
@@ -285,7 +340,7 @@ def _read_bytes(source: str | Path | BinaryIO) -> bytes:
 
 
 def _decode(raw: bytes, forced: str | None) -> tuple[str, str]:
-    """Decode bytes, returning the text and the encoding that worked."""
+    """Text plus the encoding that worked."""
     for candidate in ([forced] if forced else list(ENCODINGS)):
         try:
             return raw.decode(candidate), candidate

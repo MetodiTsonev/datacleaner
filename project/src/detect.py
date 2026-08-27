@@ -1,12 +1,7 @@
-"""Stage 3 - the runner.
+"""Runs the checks and orders the results.
 
-Runs every registered check and orders the results. Deliberately thin: the checks
-live in `checks.py` and the finding contract in `finding.py`, so this module is only
-about sequencing and presentation.
-
-Stage 2 described the data. This stage judges it. The separation is deliberate: every
-action the system later takes can be traced back to a specific finding, and every
-finding to a specific measurement.
+Thin on purpose - checks live in checks.py, the contract in finding.py. Profiling
+described the data; this judges it, so every later action traces back to a finding.
 """
 
 from __future__ import annotations
@@ -64,22 +59,14 @@ def detect(
 
 
 def protect_target(findings: list[Finding], target: str) -> list[Finding]:
-    """Rewrite any repair that would alter the column being predicted.
+    """Rewrite any repair that would touch the column being predicted.
 
-    Two things must never happen to a target, and nothing else in the pipeline
-    prevents them:
+    Two things nothing else prevents. It must not be imputed - a filled-in label is a
+    guess dressed as an observation, and the model just learns the imputer, so we drop
+    the row instead. And it must not be dropped as redundant or identifier-like, which
+    would remove the thing we're predicting.
 
-    **It must not be imputed.** A filled-in label is a guess presented as an
-    observation, and a model trained on it learns to reproduce the imputer. The row
-    is dropped instead: losing a row costs information, inventing a label adds wrong
-    information, and the second is worse.
-
-    **It must not be dropped as a feature.** A target that is highly correlated with
-    another column, or that happens to be unique per row, would otherwise be
-    proposed for removal by the redundancy and identifier checks -- removing the
-    thing you are trying to predict.
-
-    Both rewrites are visible in the message, not silent, so the cost is stated.
+    Both rewrites show up in the message rather than happening silently.
     """
     protected: list[Finding] = []
     for finding in findings:
@@ -137,8 +124,8 @@ def protect_target(findings: list[Finding], target: str) -> list[Finding]:
 
 def summarise(findings: list[Finding]) -> dict[str, Any]:
     """Counts by severity and by mandated topic, for the UI and the report."""
-    by_severity = {s: 0 for s in SEVERITIES}
-    by_topic = {t: 0 for t in TOPICS}
+    by_severity = dict.fromkeys(SEVERITIES, 0)
+    by_topic = dict.fromkeys(TOPICS, 0)
     for finding in findings:
         by_severity[finding.severity] += 1
         by_topic[finding.topic] += 1

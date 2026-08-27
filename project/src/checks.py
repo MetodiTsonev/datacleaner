@@ -1,23 +1,10 @@
-"""Stage 3 - the checks themselves.
+"""The checks. One function per defect.
 
-One function per defect. Each takes the frame and its profiles and returns zero or
-more :class:`~src.finding.Finding` objects, so a check is entirely independent of
-every other check and of the runner.
+Each takes the frame plus its profiles and returns Findings, so checks don't know
+about each other or about the runner. Adding one is a function plus a line in CHECKS
+(there's a test that catches a forgotten line).
 
-Adding a check is one function plus one line in :data:`CHECKS`. There is a test that
-fails if a check is written but not registered, because an unregistered check would
-simply never run and nobody would notice.
-
-Two design notes worth defending:
-
-**Severity is not a score.** It orders the list and decides what blocks. It is never
-summed into an index -- see `writing/decisions.md` Р5 for why the first attempt's
-composite quality score was withdrawn.
-
-**A check may disclaim its own result.** The outlier rules on a column where one
-value dominates, or on a short discrete scale, report their counts *and* say the
-counts must not be read as error counts. Silently "fixing" values a rule cannot judge
-is worse than declining.
+Severity orders the list; it's never summed into a score. See writing/decisions.md P5.
 """
 
 from __future__ import annotations
@@ -25,82 +12,55 @@ from __future__ import annotations
 import re
 import unicodedata
 
-import numpy as np
 import pandas as pd
 
 from src.finding import Finding, Suggestion
-from src.profile import DISGUISED_TOKENS, ColumnProfile
+from src.profile import ColumnProfile
+from src.text import (
+    disguised_values,
+    normalise,
+    normalise_scalar,
+    numeric_share_after_cleaning,
+    real_values,
+    strip_number_marks,
+)
 
-#: Multiplier on the interquartile range. 1.5 is the textbook "outlier" fence and
-#: 3.0 the "far out" fence; 3.0 is used because at 1.5 an ordinary skewed column
-#: flags a tenth of its rows, which is noise rather than a finding.
+# Tukey's "far out" fence. At 1.5 an ordinary skewed column flags a tenth of itself.
 IQR_MULTIPLIER = 3.0
 
-#: Cut-off for the MAD-based modified z-score. 3.5 is Iglewicz & Hoaglin's
-#: recommendation.
+# Iglewicz & Hoaglin's recommended cut-off.
 MODIFIED_Z_THRESHOLD = 3.5
 
-#: 0.6745 is the 0.75 quantile of the standard normal, which rescales the median
-#: absolute deviation so that it estimates the standard deviation for normal data.
+# 0.75 quantile of the standard normal: rescales MAD to estimate sigma.
 MAD_SCALE = 0.6745
 
-#: A column where one value covers at least this share cannot be judged by a
-#: spread-based rule: the quartiles collapse onto that value.
+# Above this, the quartiles collapse onto the dominant value and spread rules break.
 DOMINANT_VALUE_SHARE = 0.40
 
-#: Below this many distinct values, a numeric column is a short discrete scale and
-#: spread-based outlier rules stop working. `education_num` runs 1-16, so its
-#: median absolute deviation is 1.0, and a modified z-score of 3.5 then flags
-#: every value more than ~5 steps from the median -- which on a 16-step scale means
-#: the ends of the scale. Preschool and Doctorate are not anomalies.
+# Short discrete scales break both rules: education_num runs 1-16, so its MAD is 1.0
+# and a z of 3.5 flags the ends of the scale. Preschool isn't an anomaly.
 OUTLIER_MIN_DISTINCT = 20
 
-#: Absolute skew above which a log transform is worth proposing.
-SKEW_THRESHOLD = 1.0
+SKEW_THRESHOLD = 1.0  # above this, a log transform is worth proposing
 
-#: Redundancy checking is quadratic in columns, so it is capped.
-MAX_COLUMNS_FOR_PAIRS = 40
+MAX_COLUMNS_FOR_PAIRS = 40  # redundancy checking is quadratic in columns
 
-#: Numbers conventionally used to mean "no value". `check_disguised_missing` cannot
-#: find these: once a CSV column of numbers containing -999 is read, the column is
-#: float64 and -999 is just a number, so a token search over text finds nothing.
-#: This is one of the commonest forms the defect takes, so it gets its own check.
+# A token search can't find these: once read, -999 is just a number in a float column.
 NUMERIC_SENTINELS = (-999.0, -9999.0, -99999.0, 999.0, 9999.0, 99999.0)
 
-#: A sentinel must repeat at least this often to be distinguishable from a value
-#: that merely happens to be 999.
-SENTINEL_MIN_COUNT = 2
+SENTINEL_MIN_COUNT = 2  # a lone 999 could be a real measurement
 
-#: Characters that turn a number written for humans into text a parser rejects.
-#: Bulgarian and wider European data routinely uses a comma as the decimal separator
-#: and a space or full stop as the thousands separator, so "1 234,56" is one and a
-#: half thousand -- but `pd.to_numeric` refuses it, the column stays text, and the
-#: system then treats a quantity as a category. Currency symbols and unit suffixes do
-#: the same damage.
-THOUSANDS_MARKS = (" ", "\u00a0", "'", "_")
-CURRENCY_MARKS = ("$", "€", "£", "лв", "lv", "BGN", "EUR", "USD", "%")
-
-#: Share of values that must become numeric after stripping the marks above before a
-#: text column is reported as a disguised quantity.
 NUMERIC_IN_TEXT_THRESHOLD = 0.90
 
-#: A value this short in a column whose typical value is much longer is a stub rather
-#: than data -- an "x" in a name column, a "1" in a description.
+# A stub is short in a column that's normally long. Both halves matter, or a column
+# of country codes reads as full of stubs.
 SHORT_VALUE_MAX_LENGTH = 2
-
-#: The typical value must be at least this many times longer for the comparison above
-#: to mean anything.
 SHORT_VALUE_LENGTH_RATIO = 3.0
 
-#: Signatures of double-decoded UTF-8. Text encoded as UTF-8 and then read as cp1252
-#: or latin-1 produces these sequences: "София" becomes "Ð¡Ð¾Ñ„Ð¸Ñ". Once written back
-#: out the damage is permanent, so it must be caught at ingestion.
+# Signatures of double-decoded UTF-8.
 MOJIBAKE_MARKERS = ("Ð", "Ñ", "Ã", "â€", "Â", "ï»¿")
+MOJIBAKE_RATE = 0.02  # markers per character
 
-#: How many mojibake markers per thousand characters before a column is flagged.
-MOJIBAKE_RATE = 0.02
-
-#: Date layouts tried when looking for more than one in a single column.
 DATE_LAYOUTS = (
     ("%Y-%m-%d", "YYYY-MM-DD"),
     ("%d/%m/%Y", "DD/MM/YYYY"),
@@ -110,7 +70,6 @@ DATE_LAYOUTS = (
     ("%Y/%m/%d", "YYYY/MM/DD"),
 )
 
-_WHITESPACE = re.compile(r"\s+")
 
 
 # ------------------------------------------------------------------- the checks
@@ -119,18 +78,13 @@ _WHITESPACE = re.compile(r"\s+")
 def check_disguised_missing(
     frame: pd.DataFrame, profiles: list[ColumnProfile]
 ) -> list[Finding]:
-    """Values that look like data but mean "missing".
-
-    The defect this project exists for. `pandas` counts `"?"` as a present value,
-    so completeness looks perfect and every later missing-data step is blind.
-    """
+    """Tokens like "?" that pandas counts as present, so completeness looks perfect."""
     findings = []
     for column in frame.columns:
         series = frame[column]
         if pd.api.types.is_numeric_dtype(series) or pd.api.types.is_bool_dtype(series):
             continue
-        text = series.dropna().astype("string").str.strip()
-        hits = text[text.str.lower().isin(DISGUISED_TOKENS)]
+        hits = disguised_values(series)
         if hits.empty:
             continue
         tokens = sorted(hits.unique())
@@ -166,19 +120,14 @@ def check_disguised_missing(
 def check_numeric_sentinels(
     frame: pd.DataFrame, profiles: list[ColumnProfile]
 ) -> list[Finding]:
-    """Numbers standing in for "missing" inside numeric columns.
+    """-999 and friends inside numeric columns, where a token search can't see them.
 
-    Only values that are the column's own minimum or maximum are considered, and
-    only when they repeat: a sentinel sits outside the real range by design, and a
-    single occurrence cannot be told apart from a genuine measurement.
+    Only the column's own min/max count, and only if they repeat - a lone 999 could
+    be a real measurement.
 
-    Whether such a value *is* missing depends on the column, and the check does not
-    pretend otherwise. A negative sentinel in a column that is otherwise
-    non-negative is almost certainly a stand-in for "no value", and a repair is
-    proposed. A sentinel at the top of a non-negative column is more likely a cap
-    -- `capital_gain` in the census file is recorded up to 99,999 and no further --
-    which is censoring, not missingness, and calls for a human decision. Those are
-    reported without a repair.
+    A negative sentinel in an otherwise non-negative column is unambiguous, so we
+    propose a fix. One at the top (capital_gain caps at 99,999) is more likely
+    censoring than missingness, so we report it and leave the call to a human.
     """
     findings = []
     for profile in profiles:
@@ -250,7 +199,7 @@ def check_numeric_sentinels(
 def check_missing_values(
     frame: pd.DataFrame, profiles: list[ColumnProfile]
 ) -> list[Finding]:
-    """Genuine nulls, per column."""
+    """Real nulls, per column."""
     findings = []
     for profile in profiles:
         if profile.n_missing == 0 or profile.semantic_type == "empty":
@@ -288,12 +237,7 @@ def check_missing_values(
 def check_uninformative_columns(
     frame: pd.DataFrame, profiles: list[ColumnProfile]
 ) -> list[Finding]:
-    """Columns that cannot contribute anything: no values, or only one value.
-
-    Reported together because they are the same defect -- no variation -- and take
-    the same repair. Separated in the message, because "empty" and "always the same"
-    mean different things to whoever produced the file.
-    """
+    """No values, or one value throughout. Same defect, same fix, one finding."""
     empty = [p.name for p in profiles if p.semantic_type == "empty"]
     constant = [p.name for p in profiles if p.semantic_type == "constant"]
     if not empty and not constant:
@@ -331,7 +275,8 @@ def check_uninformative_columns(
 def check_identifier_columns(
     frame: pd.DataFrame, profiles: list[ColumnProfile]
 ) -> list[Finding]:
-    """Columns that identify rows rather than describing them."""
+    """Near-unique columns. Must not become features - accidental correlation with
+    the target through collection order is a leakage route."""
     names = [p.name for p in profiles if p.semantic_type == "identifier"]
     if not names:
         return []
@@ -359,7 +304,7 @@ def check_identifier_columns(
 def check_exact_duplicates(
     frame: pd.DataFrame, profiles: list[ColumnProfile]
 ) -> list[Finding]:
-    """Rows identical across every column."""
+    """Fully identical rows."""
     mask = frame.duplicated(keep="first")
     count = int(mask.sum())
     if count == 0:
@@ -395,11 +340,10 @@ def check_exact_duplicates(
 def check_normalised_duplicates(
     frame: pd.DataFrame, profiles: list[ColumnProfile]
 ) -> list[Finding]:
-    """Rows identical once case and whitespace are ignored.
+    """Duplicates once case and spacing are ignored.
 
-    Reported separately from exact duplicates, and only for the *additional* rows
-    it finds, so the two counts can be compared. The gap between them measures how
-    much of the duplication is formatting rather than repetition.
+    Reports only the *extra* rows beyond the exact count, so the gap between the two
+    measures how much duplication is formatting rather than repetition.
     """
     text_columns = [
         c for c in frame.columns if not pd.api.types.is_numeric_dtype(frame[c])
@@ -408,7 +352,7 @@ def check_normalised_duplicates(
         return []
     normalised = frame.copy()
     for column in text_columns:
-        normalised[column] = _normalise_text(normalised[column])
+        normalised[column] = normalise(normalised[column])
     total = int(normalised.duplicated(keep="first").sum())
     exact = int(frame.duplicated(keep="first").sum())
     extra = total - exact
@@ -445,7 +389,7 @@ def check_normalised_duplicates(
 def check_inconsistent_categories(
     frame: pd.DataFrame, profiles: list[ColumnProfile]
 ) -> list[Finding]:
-    """One category spelled several ways in the same column."""
+    """One category spelled several ways."""
     findings = []
     for profile in profiles:
         if profile.semantic_type not in {"categorical", "boolean"}:
@@ -453,7 +397,7 @@ def check_inconsistent_categories(
         values = frame[profile.name].dropna().astype("string")
         groups: dict[str, set[str]] = {}
         for value in values.unique():
-            groups.setdefault(_normalise_scalar(value), set()).add(value)
+            groups.setdefault(normalise_scalar(value), set()).add(value)
         clashes = {k: sorted(v) for k, v in groups.items() if len(v) > 1}
         if not clashes:
             continue
@@ -487,17 +431,12 @@ def check_inconsistent_categories(
 def check_mixed_types(
     frame: pd.DataFrame, profiles: list[ColumnProfile]
 ) -> list[Finding]:
-    """Columns holding both numbers and non-numeric text.
-
-    Disguised blanks are excluded first: a numeric column with `"?"` in it is a
-    missing-value problem, already reported, not a mixed-type problem.
-    """
+    """Numbers and text in one column. Blanks excluded - those are reported already."""
     findings = []
     for profile in profiles:
         if profile.semantic_type in {"numeric", "empty", "constant", "datetime"}:
             continue
-        text = frame[profile.name].dropna().astype("string").str.strip()
-        real = text[~text.str.lower().isin(DISGUISED_TOKENS)]
+        real = real_values(frame[profile.name])
         if real.empty:
             continue
         numeric_share = float(pd.to_numeric(real, errors="coerce").notna().mean())
@@ -534,14 +473,13 @@ def check_mixed_types(
 
 
 def check_outliers(frame: pd.DataFrame, profiles: list[ColumnProfile]) -> list[Finding]:
-    """Extreme numeric values, by two rules that are reported side by side.
+    """Extreme values, by two rules reported side by side.
 
-    The IQR fence is the familiar rule. The MAD-based modified z-score is more
-    robust on skewed data, because the median absolute deviation is not itself
-    pulled outward by the extremes it is meant to find.
+    IQR is the familiar fence. The MAD modified z-score is more robust on skewed data
+    - the median absolute deviation isn't dragged out by what it's looking for.
 
-    Where one value dominates the column, both rules are unreliable and the
-    finding says so rather than proposing a repair.
+    Where one value dominates, or the scale is short and discrete, neither rule works.
+    Those say so instead of proposing a fix.
     """
     findings = []
     for profile in profiles:
@@ -654,7 +592,7 @@ def check_outliers(frame: pd.DataFrame, profiles: list[ColumnProfile]) -> list[F
 
 
 def check_high_skew(frame: pd.DataFrame, profiles: list[ColumnProfile]) -> list[Finding]:
-    """Strongly asymmetric numeric columns, which a log transform can straighten."""
+    """Skewed columns a log transform can straighten."""
     findings = []
     for profile in profiles:
         skew = profile.stats.get("skew")
@@ -697,12 +635,11 @@ def check_high_skew(frame: pd.DataFrame, profiles: list[ColumnProfile]) -> list[
 def check_redundant_columns(
     frame: pd.DataFrame, profiles: list[ColumnProfile]
 ) -> list[Finding]:
-    """Pairs of columns encoding exactly the same information.
+    """Column pairs holding the same information, as a strict 1:1 mapping.
 
-    Tested as a one-to-one mapping in both directions: `education` and
-    `education_num` in the census file are the same 16 levels, once as labels and
-    once as codes. Correlation is not used -- it answers a different question and
-    needs a threshold this project has no basis to choose.
+    education / education_num are the same 16 levels, once as labels and once as
+    codes. Not correlation - that answers a different question and needs a threshold
+    we've no basis to pick.
     """
     candidates = [
         p.name
@@ -756,29 +693,23 @@ def check_redundant_columns(
 def check_numeric_in_text(
     frame: pd.DataFrame, profiles: list[ColumnProfile]
 ) -> list[Finding]:
-    """Quantities written for humans and therefore stored as text.
+    """Numbers stored as text: "1 234,56", "$100", "12 lv", "45%".
 
-    `"1 234,56"`, `"$100"`, `"12 lv"`, `"45%"`. Every one is a number, and none of
-    them parses. The column stays text, so the system treats a quantity as a
-    category: it fills gaps with the most common string instead of the median, and
-    one-hot encodes it into as many columns as it has distinct values.
-
-    This is the most damaging of the format defects and the most common, because a
-    comma decimal separator is the norm across Europe including Bulgaria.
+    Left as text they're treated as categories - mode-filled, and one-hot encoded
+    across every distinct value. Common, since a comma decimal is the European norm.
     """
     findings = []
     for profile in profiles:
         if profile.semantic_type not in {"categorical", "text", "identifier"}:
             continue
-        text = frame[profile.name].dropna().astype("string").str.strip()
-        real = text[~text.str.lower().isin(DISGUISED_TOKENS)]
+        real = real_values(frame[profile.name])
         if real.empty:
             continue
         if pd.to_numeric(real, errors="coerce").notna().mean() >= 0.5:
             continue  # already handled by the type inference in stage 2
 
-        cleaned, marks = _strip_number_marks(real)
-        share = float(pd.to_numeric(cleaned, errors="coerce").notna().mean())
+        _, marks = strip_number_marks(real)
+        share = numeric_share_after_cleaning(real)
         if share < NUMERIC_IN_TEXT_THRESHOLD or not marks:
             continue
         findings.append(
@@ -815,11 +746,8 @@ def check_numeric_in_text(
 
 
 def check_whitespace(frame: pd.DataFrame, profiles: list[ColumnProfile]) -> list[Finding]:
-    """Values differing from their neighbours only by spaces.
-
-    `"Sofia "` and `"Sofia"` are two categories to every encoder and two keys to
-    every join, and the difference is invisible on screen.
-    """
+    """Leading, trailing or doubled spaces. "Sofia " and "Sofia" are two categories
+    to any encoder and two keys to any join, and look identical on screen."""
     findings = []
     for profile in profiles:
         if profile.semantic_type in {"numeric", "empty", "datetime", "boolean"}:
@@ -866,17 +794,15 @@ def check_whitespace(frame: pd.DataFrame, profiles: list[ColumnProfile]) -> list
 def check_short_values(
     frame: pd.DataFrame, profiles: list[ColumnProfile]
 ) -> list[Finding]:
-    """One- or two-character values in a column whose values are normally long.
+    """Stubs like "x" where a name belongs - typed to get past a required field.
 
-    A single letter where a name belongs is a placeholder someone typed to get past
-    a required field. It is not a missing-value token, so nothing else catches it.
+    Not a recognised missing-value token, so nothing else catches them.
     """
     findings = []
     for profile in profiles:
         if profile.semantic_type not in {"categorical", "text", "identifier"}:
             continue
-        text = frame[profile.name].dropna().astype("string").str.strip()
-        real = text[~text.str.lower().isin(DISGUISED_TOKENS)]
+        real = real_values(frame[profile.name])
         if len(real) < 10:
             continue
         lengths = real.str.len()
@@ -913,11 +839,9 @@ def check_short_values(
 def check_encoding_damage(
     frame: pd.DataFrame, profiles: list[ColumnProfile]
 ) -> list[Finding]:
-    """Mojibake - text encoded as UTF-8 and then read as something else.
+    """Mojibake: "София" read as cp1252 becomes "Ð¡Ð¾Ñ„Ð¸Ñ".
 
-    "София" read as cp1252 becomes "Ð¡Ð¾Ñ„Ð¸Ñ". The damage happens at ingestion and
-    becomes permanent the moment the file is written back out, so it has to be caught
-    on the way in rather than diagnosed later.
+    Unfixable once written back out, so it has to be caught on the way in.
     """
     findings = []
     for profile in profiles:
@@ -965,19 +889,16 @@ def check_encoding_damage(
 def check_mixed_date_formats(
     frame: pd.DataFrame, profiles: list[ColumnProfile]
 ) -> list[Finding]:
-    """More than one date layout in a single column.
+    """Two date layouts in one column.
 
-    `01/02/2024` and `2024-03-15` in the same column means at least one of them will
-    be misread, and `01/02` is ambiguous between January the second and the first of
-    February. Parsing such a column silently produces plausible wrong dates, which is
-    worse than failing.
+    01/02/2024 next to 2024-03-15 means one gets misread, and day/month is ambiguous.
+    Parsing yields plausible wrong dates, which beats failing only in appearance.
     """
     findings = []
     for profile in profiles:
         if profile.semantic_type not in {"categorical", "text", "datetime", "identifier"}:
             continue
-        text = frame[profile.name].dropna().astype("string").str.strip()
-        real = text[~text.str.lower().isin(DISGUISED_TOKENS)]
+        real = real_values(frame[profile.name])
         if len(real) < 4:
             continue
         matched: dict[str, int] = {}
@@ -1016,11 +937,7 @@ def check_mixed_date_formats(
 def check_control_characters(
     frame: pd.DataFrame, profiles: list[ColumnProfile]
 ) -> list[Finding]:
-    """Non-printable characters inside values.
-
-    Newlines and tabs pasted into a cell break CSV round-trips, shift columns and
-    are invisible in a spreadsheet.
-    """
+    """Newlines and tabs inside cells. They shift columns on a CSV round-trip."""
     findings = []
     for profile in profiles:
         if profile.semantic_type in {"numeric", "empty", "datetime", "boolean"}:
@@ -1068,11 +985,10 @@ def check_control_characters(
 def check_column_names(
     frame: pd.DataFrame, profiles: list[ColumnProfile]
 ) -> list[Finding]:
-    """Header problems: duplicates, stray spacing, embedded newlines.
+    """Duplicate, untrimmed or line-broken headers.
 
-    Two columns both called `Amount` do not survive a CSV read -- pandas silently
-    renames the second to `Amount.1` and nothing tells you. A header with a trailing
-    space fails every lookup by its visible name.
+    Two columns called Amount don't survive a read - pandas renames one to Amount.1
+    and says nothing. A trailing space fails every lookup by the visible name.
     """
     names = [str(c) for c in frame.columns]
     duplicated = sorted({n.strip().casefold() for n in names
@@ -1125,11 +1041,7 @@ def check_column_names(
 
 
 def check_empty_rows(frame: pd.DataFrame, profiles: list[ColumnProfile]) -> list[Finding]:
-    """Rows with no value in any column.
-
-    Blank separator rows are ordinary in spreadsheet exports. They count toward every
-    row total and dilute every share.
-    """
+    """Blank rows. Ordinary in spreadsheet exports, and they dilute every percentage."""
     if frame.empty:
         return []
     blank = frame.isna().all(axis=1)
@@ -1161,12 +1073,11 @@ def check_empty_rows(frame: pd.DataFrame, profiles: list[ColumnProfile]) -> list
 def check_summary_rows(
     frame: pd.DataFrame, profiles: list[ColumnProfile]
 ) -> list[Finding]:
-    """Totals rows at the foot of an export.
+    """TOTAL rows at the foot of an export.
 
-    A `TOTAL` row is not an observation. Left in place it becomes the maximum of
-    every numeric column, so it sets the outlier bounds, shifts the mean and
-    survives as a training row. It is usually recognisable because its label column
-    says so while its other label columns are empty.
+    Not an observation: it becomes the max of every numeric column, so it sets the
+    outlier bounds, moves the mean, and gets trained on. Usually recognisable by one
+    label column saying so while the others are blank.
     """
     if len(frame) < 3:
         return []
@@ -1219,34 +1130,7 @@ def check_summary_rows(
     ]
 
 
-def _strip_number_marks(values: pd.Series) -> tuple[pd.Series, list[str]]:
-    """Remove human number formatting, reporting which marks were present.
-
-    Order matters. Thousands separators go first, then currency and units, then a
-    comma decimal separator becomes a full stop -- doing that last avoids turning
-    "1,234" into "1.234" when the comma was a thousands mark.
-    """
-    found: list[str] = []
-    text = values.astype("string")
-
-    for mark in THOUSANDS_MARKS:
-        if text.str.contains(re.escape(mark), regex=True, na=False).any():
-            found.append("thousands separator" if mark != "'" else "apostrophe")
-            text = text.str.replace(mark, "", regex=False)
-    for mark in CURRENCY_MARKS:
-        if text.str.contains(re.escape(mark), case=False, regex=True, na=False).any():
-            found.append(mark)
-            text = text.str.replace(mark, "", case=False, regex=False)
-    text = text.str.strip()
-    # A single comma with two or three digits after it is a decimal separator.
-    if text.str.match(r"^-?\d+,\d{1,3}$", na=False).any():
-        found.append("comma decimal separator")
-        text = text.str.replace(",", ".", regex=False)
-    return text, sorted(set(found))
-
-
-
-#: Every check, in the order their findings read best.
+# Order affects how the findings read, nothing else.
 CHECKS = (
     check_column_names,
     check_disguised_missing,
@@ -1270,19 +1154,3 @@ CHECKS = (
     check_outliers,
     check_high_skew,
 )
-
-
-# ------------------------------------------------------------------- text helpers
-
-
-def _normalise_scalar(value: Any) -> str:
-    """Casefold, trim, collapse internal whitespace. Used to group spellings."""
-    return _WHITESPACE.sub(" ", str(value).strip()).casefold()
-
-
-def _normalise_text(series: pd.Series) -> pd.Series:
-    """Vectorised form of :func:`_normalise_scalar`, preserving nulls."""
-    text = series.astype("string").str.strip().str.replace(
-        _WHITESPACE, " ", regex=True
-    ).str.casefold()
-    return text.where(series.notna(), np.nan)
