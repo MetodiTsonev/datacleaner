@@ -25,6 +25,38 @@ faced from scratch. The first attempt reached 100% code and 0 pages.
 
 ---
 
+## ⚠ Correction, 2026-08-27 — a mandated verb was missing
+
+This plan originally had eight stages and **no validation stage**. The задание says the
+system automates *"почистване, трансформиране и **валидиране** на данни"* — three verbs,
+and the third had no owner.
+
+The checks in stage 3 are automatic **discovery**: the system deciding for itself what
+looks wrong. Validation is a different thing — checking data against rules **someone
+declared**: `age > 0`, `city ∈ {…}`, `order_id` unique, `end_date >= start_date`.
+Conflating them hid the fact that one of three mandated verbs was not implemented.
+
+Same class of error as the first project's omission of *откриване на аномалии*: a
+requirement with no module, no chapter section, no experiment. Found by the author
+asking why the checks did not cover ordinary constraints.
+
+**Correction:** stage 4 is now validation; the pipeline has nine stages. Recorded in
+`writing/decisions.md` Р8 so the correction is traceable rather than silently absorbed.
+
+Two scope additions agreed at the same time (Tier 1):
+
+- **Six format-hygiene checks.** Measured gaps, none of them caught: leading/trailing
+  whitespace; single characters in a longer text column; `1 234,56` / `$100` / `12 lv`
+  (numeric quantities arriving as text — the worst, since such a column is then one-hot
+  encoded instead of averaged); mojibake from double-decoded UTF-8; mixed date layouts
+  in one column; control characters.
+- **Ingestion and correctness fixes.** The target column was unprotected — stage 6
+  would have median-imputed it, fabricating labels. Plus junk rows at the top and
+  bottom of exports (title rows, blank rows, `TOTAL` rows), messy and duplicate column
+  names, the decimal separator, and fully empty rows.
+
+---
+
 ## Anti-drift rules — the reason this plan exists
 
 These are binding. The previous project ballooned because none of them existed.
@@ -33,6 +65,14 @@ These are binding. The previous project ballooned because none of them existed.
    This is the hard gate. No starting step N+1 with step N's explanation unwritten.
 2. **Line budgets per module** are given below. Exceeding a budget by more than ~50% is a
    signal to stop and reconsider, not to keep going.
+
+   ① `checks.py` is the one accepted overrun, agreed explicitly on 2026-08-27 rather
+   than quietly revised. It holds 21 independent check functions; ~40% of its lines are
+   the user-facing messages that explain each finding, which are the product rather
+   than overhead, and the logic is ~24 lines per check. Two checks were merged before
+   accepting it (`empty_columns` + `constant_columns`). No other budget may be raised
+   without the same explicit agreement — a budget revised whenever it is breached is
+   not a budget.
 3. **Every component must trace to a requirement in `writing/00-zadanie.md`.** If it
    doesn't, it isn't built. No exceptions for interesting ideas.
 4. **The dependency list is closed:** `pandas`, `numpy`, `streamlit`, `openpyxl`,
@@ -56,7 +96,9 @@ project/
 ├── src/
 │   ├── loader.py         read CSV/XLSX, encoding fallback     ~90
 │   ├── profile.py        semantic type inference + stats     ~170
-│   ├── detect.py         eight checks -> Findings            ~260
+│   ├── detect.py         the Finding contract + the runner     ~90
+│   ├── checks.py         the checks, grouped by topic         ~1000 ①
+│   ├── validate.py       declared constraints + quarantine    ~200
 │   ├── plan.py           Findings -> ordered repair steps    ~130
 │   ├── clean.py          structure, duplicates, missing      ~320
 │   ├── anomalies.py      IQR / z-score / MAD, capping        ~150
@@ -128,7 +170,25 @@ nulls; 52 exact duplicate rows; `education` ↔ `education_num` redundancy;
 **Writing:** `writing/04-implementation/02-detect.md`, plus start
 `writing/02-theory/02-anomalies.md` (the MAD modified z-score is theory, not just code).
 
-## Step 3 — Repair plan
+## Step 3 — Validation against declared constraints
+
+The mandated verb. Small and declarative.
+
+- **Rule types:** not-null, unique, numeric range, allowed value set, regex pattern,
+  expected type, and one cross-column comparison (`a <= b`).
+- **Inferred as a draft** from the profile, then **editable by the user** in the UI.
+  Inference cannot tell an intentional constraint from an accident of this batch, and
+  must say so.
+- **Output is a split, not a verdict:** valid rows, and rejected rows each carrying the
+  reason they failed. Rejected rows export separately — the quarantine file.
+
+**Done when:** a rule added in the UI (`amount > 0`) immediately reports which rows
+fail and why, and those rows can be exported. This is the ten-second answer to *"could
+you add a constraint?"* at the defence.
+**Writing:** `writing/04-implementation/03-validate.md`,
+`writing/02-theory/05-validation.md`.
+
+## Step 4 — Repair plan
 
 - A **fixed, sensible order** of stages, filtered to the ones the findings require. No
   topological sort — the order is a documented design decision, not a computation.
@@ -144,7 +204,7 @@ nulls; 52 exact duplicate rows; `education` ↔ `education_num` redundancy;
 imputation step.
 **Writing:** `writing/04-implementation/03-plan.md`.
 
-## Step 4 — Cleaning: structure, duplicates, missing values
+## Step 5 — Cleaning: structure, duplicates, missing values
 
 Pre-split (nothing learned from data): drop constant columns → normalise categories →
 replace disguised missing → drop duplicates.
@@ -155,6 +215,11 @@ Post-split, fitted on the training half only: impute — global median/mode, opt
 **group-wise median** where a sensible grouping column exists, plus `was_missing`
 indicator columns.
 
+**The target column is protected throughout.** Never imputed, never transformed, never
+scaled, never encoded as a feature. Rows whose target is missing are **dropped**,
+because a guessed label is worse than a missing row. Nothing in the original plan
+prevented median-imputing the target, which would have fabricated labels.
+
 **Done when:** census cleaned to zero nulls with the 52 duplicates gone, **and a test
 proves the fill value equals the training median, not the full-data median.** That test
 is the leakage guarantee and it is worth one sentence at the defence.
@@ -162,7 +227,7 @@ is the leakage guarantee and it is worth one sentence at the defence.
 `writing/02-theory/01-missing-values.md` — the latter must survey MICE, GAIN/MIWAE/VAE
 and say plainly that we implement the simpler method and why.
 
-## Step 5 — Anomalies
+## Step 6 — Anomalies
 
 - IQR bounds, z-score, MAD-based modified z-score; state why MAD is more robust on
   skewed data.
@@ -177,7 +242,7 @@ and say plainly that we implement the simpler method and why.
 **Writing:** finish `writing/02-theory/02-anomalies.md`, add
 `writing/04-implementation/05-anomalies.md`.
 
-## Step 6 — Feature engineering
+## Step 7 — Feature engineering
 
 - Measure skew, apply `log1p` where high, **report skew before and after** —
   `capital_gain` 11.89 → ~0 is figure material.
@@ -195,7 +260,7 @@ feature count reported before and after.
 **Writing:** `writing/02-theory/04-features.md`,
 `writing/04-implementation/06-features.md`.
 
-## Step 7 — Evidence that cleaning helped
+## Step 8 — Evidence that cleaning helped
 
 Pure NumPy, ~160 lines: stratified split, logistic regression by gradient descent on
 standardised inputs, ROC AUC. Compare raw (minimally encoded so a model can run at all)
@@ -216,7 +281,7 @@ against a hand-computed small case.
 **Writing:** `writing/04-implementation/07-evaluate.md`,
 `writing/05-results/01-evidence.md`.
 
-## Step 8 — The Streamlit app
+## Step 9 — The Streamlit app
 
 Tabs, left to right, mirroring the pipeline: **Data → Profile → Findings → Plan → Run →
 Before/After → Evidence → Export**.
@@ -230,7 +295,7 @@ Before/After → Evidence → Export**.
 the terminal.
 **Writing:** `writing/04-implementation/08-app.md`.
 
-## Step 9 — Consolidate
+## Step 10 — Consolidate
 
 - Tests green across the core modules.
 - Generate the figures from `writing/figures.md` this project actually supports. Each
@@ -240,7 +305,7 @@ the terminal.
 
 **Done when:** `pytest` passes, the figures exist, and the README works for a stranger.
 
-## Step 10 — Thesis text
+## Step 11 — Thesis text
 
 Assemble chapters from `writing/`. Planned separately — it is the largest remaining
 piece of work and it is not code.

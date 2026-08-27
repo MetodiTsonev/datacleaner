@@ -19,6 +19,7 @@ writing/04-implementation/01-loader-profile.md.
 
 from __future__ import annotations
 
+import re
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
@@ -56,7 +57,12 @@ NUMERIC_CODE_HINT_DISTINCT = 10
 #: describing them. Such columns must never become model features: an identifier
 #: correlated with the target by accident of collection order is a classic
 #: leakage route.
-IDENTIFIER_MIN_DISTINCT_SHARE = 0.99
+#:
+#: The share is measured against the number of **distinct rows**, not all rows. An
+#: identifier is unique per record, and a duplicated record legitimately repeats
+#: it -- so counting all rows makes a real identifier look less unique the dirtier
+#: the file is, which is precisely backwards.
+IDENTIFIER_MIN_DISTINCT_SHARE = 0.95
 
 #: Mean character length above which a non-categorical text column is free text
 #: rather than a short label.
@@ -72,6 +78,15 @@ DISGUISED_TOKENS = frozenset(
         "-", "--", "---", ".", "unknown", "unspecified", "missing", "",
         "-999", "-9999", "999", "9999",
     }
+)
+
+#: A value must look date-shaped before `to_datetime` is allowed near it. Two or
+#: more of the same separator, or a bare 8-digit date. Without this, `pd.to_datetime`
+#: accepts "1,50" -- so a European price column, where the comma is the decimal
+#: separator, was being classified as dates.
+_DATE_SHAPED = re.compile(
+    r"^\s*(?:\d{8}|\d{1,4}([-/.])\d{1,2}\1\d{1,4}"
+    r"|\d{1,4}([-/.])\d{1,2}\2\d{1,4}[ T].*)\s*$"
 )
 
 #: Recognised as booleans regardless of case.
@@ -116,14 +131,25 @@ class ColumnProfile:
         return asdict(self)
 
 
-def profile_column(series: pd.Series) -> ColumnProfile:
-    """Describe one column and assign it a semantic type."""
+def profile_column(
+    series: pd.Series, *, n_distinct_rows: int | None = None
+) -> ColumnProfile:
+    """Describe one column and assign it a semantic type.
+
+    Args:
+        series: the column.
+        n_distinct_rows: how many distinct rows the table has. Used only for
+            identifier detection -- see `IDENTIFIER_MIN_DISTINCT_SHARE`. Defaults
+            to the column length, which is right for a standalone column.
+    """
     n_rows = len(series)
     present = series.dropna()
     n_missing = n_rows - len(present)
     distinct = present.nunique()
 
-    semantic, note = _infer_type(series, present, distinct, n_rows)
+    semantic, note = _infer_type(
+        series, present, distinct, n_rows, n_distinct_rows or n_rows
+    )
 
     top_value, top_share = None, 0.0
     if len(present) and semantic in {"boolean", "categorical", "constant", "text"}:
@@ -147,7 +173,11 @@ def profile_column(series: pd.Series) -> ColumnProfile:
 
 
 def _infer_type(
-    series: pd.Series, present: pd.Series, distinct: int, n_rows: int
+    series: pd.Series,
+    present: pd.Series,
+    distinct: int,
+    n_rows: int,
+    n_distinct_rows: int,
 ) -> tuple[str, str]:
     """Assign a semantic type. Order matters: cheapest and most certain first."""
     if len(present) == 0:
@@ -224,10 +254,11 @@ def _infer_type(
     # Order matters: a unique column of long strings is prose, not an identifier.
     if real.str.len().mean() >= TEXT_MIN_MEAN_LENGTH:
         return "text", disguised_note
-    if distinct / n_rows >= IDENTIFIER_MIN_DISTINCT_SHARE:
+    per_record = distinct / n_distinct_rows if n_distinct_rows else 0.0
+    if per_record >= IDENTIFIER_MIN_DISTINCT_SHARE:
         return "identifier", (
-            f"{100 * distinct / n_rows:.1f}% of values are unique - identifies "
-            "rows rather than describing them, so it must not become a feature"
+            f"{100 * per_record:.1f}% unique per distinct row - identifies rows "
+            "rather than describing them, so it must not become a feature"
         )
     return "categorical", f"high cardinality ({distinct} distinct values)"
 
@@ -260,10 +291,15 @@ def _is_integral(present: pd.Series) -> bool:
 def _datetime_share(as_text: pd.Series) -> float:
     """Share of values pandas can read as dates.
 
-    Guarded: pandas warns (and historically guessed per-element) on ambiguous
-    input, and a purely numeric column would otherwise be read as dates.
+    Two guards, both earned. A mostly-numeric column is rejected outright, because
+    `to_datetime` will read bare integers as dates. And every value must look
+    date-shaped first -- `to_datetime` accepts "1,50", which meant a European price
+    column, where the comma is the decimal separator, was classified as dates.
     """
     if pd.to_numeric(as_text, errors="coerce").notna().mean() > 0.5:
+        return 0.0
+    shaped = as_text.str.match(_DATE_SHAPED, na=False)
+    if float(shaped.mean()) < DATETIME_THRESHOLD:
         return 0.0
     try:
         parsed = pd.to_datetime(as_text, errors="coerce", format="mixed")
@@ -298,8 +334,29 @@ def _stats(present: pd.Series, semantic: str) -> dict[str, float]:
 
 
 def profile_frame(frame: pd.DataFrame) -> list[ColumnProfile]:
-    """Profile every column, in the frame's own column order."""
-    return [profile_column(frame[col]) for col in frame.columns]
+    """Profile every column, in the frame's own column order.
+
+    Raises:
+        ValueError: if two columns share a name. `frame["Amount"]` then returns a
+            DataFrame rather than a Series, and every operation expecting one column
+            fails with pandas' "truth value of a Series is ambiguous" -- an error
+            that says nothing about the actual problem. Reading through
+            `src.loader.read_table` makes names unique and reports the change.
+    """
+    labels = [str(c) for c in frame.columns]
+    duplicated = sorted({c for c in labels if labels.count(c) > 1})
+    if duplicated:
+        raise ValueError(
+            f"These column names appear more than once: {duplicated}. Read the file "
+            "through src.loader.read_table, which makes names unique and reports "
+            "what it changed."
+        )
+
+    n_distinct_rows = len(frame.drop_duplicates()) if len(frame) else 0
+    return [
+        profile_column(frame[col], n_distinct_rows=n_distinct_rows)
+        for col in frame.columns
+    ]
 
 
 def as_table(profiles: list[ColumnProfile]) -> pd.DataFrame:

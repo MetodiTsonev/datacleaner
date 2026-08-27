@@ -16,6 +16,8 @@ from pathlib import Path
 
 import streamlit as st
 
+from src.detect import as_table as findings_table
+from src.detect import detect, summarise
 from src.loader import read_table
 from src.profile import as_table, profile_frame, type_counts
 
@@ -66,6 +68,17 @@ with st.sidebar.expander("Advanced"):
         "Force encoding", ["detect", "utf-8", "cp1252", "latin-1"],
         help="Leave on detect unless characters look damaged.",
     )
+    decimal_mark = st.selectbox(
+        "Decimal separator", [". (point)", ", (comma)"],
+        help="Comma is the convention across most of Europe: 1,5 means one and a half.",
+    )
+    skip_rows = st.number_input(
+        "Rows to skip above the header", min_value=-1, value=-1, step=1,
+        help=(
+            "-1 detects junk rows automatically. Spreadsheet exports often begin "
+            "with a title row and a blank row. Set 0 to read them as data."
+        ),
+    )
 
 
 # ------------------------------------------------------------------- main pane
@@ -82,15 +95,35 @@ try:
         has_header=has_header,
         encoding=None if forced_encoding == "detect" else forced_encoding,
         delimiter=forced_delimiter or None,
+        decimal="," if decimal_mark.startswith(",") else ".",
+        skip_rows=None if skip_rows < 0 else int(skip_rows),
     )
 except Exception as exc:  # noqa: BLE001 - shown to the user rather than swallowed
     st.error(f"Could not read this file. {type(exc).__name__}: {exc}")
     st.stop()
 
 frame = load.frame
-profiles = profile_frame(frame)
 
-tab_data, tab_profile = st.tabs(["Data", "Profile"])
+st.sidebar.subheader("Target")
+target = st.sidebar.selectbox(
+    "Column to predict (optional)",
+    ["— none —", *[str(c) for c in frame.columns]],
+    help=(
+        "Naming it protects it: the target is never filled in, transformed or "
+        "dropped, and rows with no label are removed rather than guessed."
+    ),
+)
+target = None if target == "— none —" else target
+
+try:
+    profiles = profile_frame(frame)
+except ValueError as exc:
+    st.error(str(exc))
+    st.stop()
+findings = detect(frame, profiles, target=target)
+findings_summary = summarise(findings)
+
+tab_data, tab_profile, tab_findings = st.tabs(["Data", "Profile", "Findings"])
 
 
 with tab_data:
@@ -100,10 +133,13 @@ with tab_data:
     b.metric("Columns", cols)
     c.metric("Missing cells pandas reports", f"{int(frame.isna().sum().sum()):,}")
 
-    summary = load.summary()
+    load_summary = load.summary()
     st.caption(
-        f"`{summary['file']}` · encoding **{summary['encoding']}** · delimiter "
-        f"**{summary['delimiter']}** · header row **{summary['header_row']}**"
+        f"`{load_summary['file']}` · encoding **{load_summary['encoding']}** · "
+        f"delimiter **{load_summary['delimiter']}** · decimal "
+        f"**{load_summary['decimal']}** · header row "
+        f"**{load_summary['header_row']}** · rows skipped "
+        f"**{load_summary['skipped_rows']}**"
     )
     for note in load.notes:
         st.warning(note, icon="⚠")
@@ -126,6 +162,8 @@ with tab_profile:
         for col, (name, n) in zip(cs, counts.items(), strict=True):
             col.metric(name, n)
 
+    if target:
+        st.caption(f"Target column: **{target}** — protected from every repair.")
     st.dataframe(as_table(profiles), width="stretch", hide_index=True)
 
     flagged = [p for p in profiles if p.note]
@@ -149,8 +187,70 @@ with tab_profile:
         )
 
 
+with tab_findings:
+    st.subheader(f"{findings_summary['total']} problem(s) found")
+    st.caption(
+        "Each finding carries a suggested repair where the system knows one. A "
+        "finding with no repair is shown as such rather than hidden — some defects "
+        "need a human decision, and some rules cannot judge the column they ran on."
+    )
+
+    if not findings:
+        st.success("No problems detected in this file.", icon="✅")
+    else:
+        cols = st.columns(max(len(findings_summary["by_severity"]), 1))
+        for col, (sev, n) in zip(cols, findings_summary["by_severity"].items(), strict=False):
+            col.metric(sev, n)
+
+        st.dataframe(findings_table(findings), width="stretch", hide_index=True)
+
+        if findings_summary["blocking"]:
+            st.error(
+                f"{len(findings_summary['blocking'])} critical finding(s). These are not a "
+                "matter of degree: until they are fixed, every completeness figure "
+                "for this file is wrong.",
+                icon="🚫",
+            )
+
+        st.subheader("In detail")
+        icon = {"critical": "🚫", "high": "🔴", "medium": "🟠", "low": "🟡", "info": "ℹ️"}
+        for f in findings:
+            with st.expander(
+                f"{icon.get(f.severity, '·')} {f.severity} · {f.check} · "
+                f"{', '.join(f.columns) or 'whole table'}"
+            ):
+                st.write(f.message)
+                if f.suggestion:
+                    st.markdown(
+                        f"**Proposed repair:** `{f.suggestion.action}` — "
+                        f"{f.suggestion.rationale}"
+                    )
+                else:
+                    st.markdown(
+                        "**No repair proposed.** See the message above for why."
+                    )
+                if f.evidence:
+                    st.json(f.evidence, expanded=False)
+
+        st.subheader("Coverage of the four mandated topics")
+        st.caption(
+            "The задание names four theoretical topics. Every finding is tagged "
+            "with the one it belongs to, so coverage can be reported rather than "
+            "asserted. `structure` covers defects belonging to none of them."
+        )
+        st.dataframe(
+            {
+                "topic": list(findings_summary["by_topic"]),
+                "findings": list(findings_summary["by_topic"].values()),
+            },
+            width="stretch",
+            hide_index=True,
+        )
+
+
 st.divider()
 st.caption(
-    "Stages 1–2 of 8 (loading, profiling). Problem detection, the repair plan, "
-    "cleaning, anomalies, features and the before/after check follow — see PLAN.md."
+    "Stages 1–3 of 9 (loading, profiling, detection). Validation against declared "
+    "constraints, the repair plan, cleaning, anomalies, features and the "
+    "before/after check follow — see PLAN.md."
 )
