@@ -1,0 +1,16 @@
+# Virtual environment
+.venv/
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+.coverage
+
+# Cleaned output is regenerable — the input files and the code define it.
+project/data/output/
+
+# macOS
+.DS_Store
