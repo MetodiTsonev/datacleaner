@@ -20,6 +20,9 @@ import streamlit as st
 from src.detect import as_table as findings_table
 from src.detect import detect, summarise
 from src.loader import probe_header, read_table
+from src.plan import PRE_SPLIT
+from src.plan import as_table as plan_table
+from src.plan import build as build_plan
 from src.profile import as_table, profile_frame, type_counts
 from src.validate import (
     Rule,
@@ -157,9 +160,10 @@ except ValueError as exc:
 findings = detect(frame, profiles, target=target)
 findings_summary = summarise(findings)
 
-tab_data, tab_profile, tab_findings, tab_validate = st.tabs(
-    ["Data", "Profile", "Findings", "Validate"]
+tab_data, tab_profile, tab_findings, tab_validate, tab_plan = st.tabs(
+    ["Data", "Profile", "Findings", "Validate", "Plan"]
 )
+repair_plan = build_plan(findings, target=target)
 
 
 with tab_data:
@@ -450,6 +454,64 @@ with tab_validate:
             file_name=f"rejected-{load.name}",
             mime="text/csv",
         )
+
+
+with tab_plan:
+    psummary = repair_plan.summary()
+    st.subheader(f"{psummary['steps']} repair step(s), in order")
+    st.caption(
+        "Not a list of suggestions — an ordered sequence. The order is fixed and the "
+        "same for every file; it is a design decision, not something computed per "
+        "file. Everything before the split is incapable of learning from the data; "
+        "everything after it is fitted on the training half only."
+    )
+
+    a, b, c, d = st.columns(4)
+    a.metric("Steps", psummary["steps"])
+    b.metric("Before split", psummary["pre_split"])
+    c.metric("After split", psummary["post_split"])
+    d.metric("Derived", psummary["derived"])
+
+    if not repair_plan.steps:
+        st.success("Nothing to repair in this file.", icon="✅")
+    else:
+        st.dataframe(plan_table(repair_plan), width="stretch", hide_index=True)
+
+        st.subheader("Why each step, in order")
+        for i, step in enumerate(repair_plan.steps, start=1):
+            where = "before split" if step.stage == PRE_SPLIT else "after split"
+            with st.expander(f"{i}. {step.action} — {where}"):
+                st.write(step.why)
+                st.markdown(
+                    "**Columns:** "
+                    + (", ".join(f"`{c}`" for c in step.columns) or "the whole table")
+                )
+                if step.from_checks:
+                    st.markdown(
+                        "**Asked for by:** "
+                        + ", ".join(f"`{c}`" for c in step.from_checks)
+                    )
+                if step.derived_from:
+                    st.info(
+                        f"Nothing reported this. It follows from "
+                        f"**{step.derived_from}**: converting a token to a null "
+                        "creates missing values that did not exist when the checks "
+                        "ran, and nothing downstream handles a null.",
+                        icon="🧩",
+                    )
+                if step.params.get("strategy"):
+                    st.caption(f"strategy: `{step.params['strategy']}`")
+
+    if repair_plan.unaddressed:
+        st.subheader("Reported but not repaired")
+        st.caption(
+            "Kept in view rather than dropped — a plan that quietly omits them looks "
+            "complete when it is not."
+        )
+        for f in repair_plan.unaddressed:
+            st.markdown(
+                f"**{f.check}** ({', '.join(f.columns) or 'whole table'}) — {f.message}"
+            )
 
 
 st.divider()

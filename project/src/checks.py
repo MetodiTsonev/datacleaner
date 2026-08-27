@@ -351,8 +351,12 @@ def check_normalised_duplicates(
     if not text_columns:
         return []
     normalised = frame.copy()
+    changed = []
     for column in text_columns:
-        normalised[column] = normalise(normalised[column])
+        cleaned = normalise(normalised[column])
+        if not cleaned.equals(frame[column].astype("string")):
+            changed.append(str(column))
+        normalised[column] = cleaned
     total = int(normalised.duplicated(keep="first").sum())
     exact = int(frame.duplicated(keep="first").sum())
     extra = total - exact
@@ -364,7 +368,7 @@ def check_normalised_duplicates(
             check="normalised_duplicates",
             severity="medium",
             topic="duplicates",
-            columns=[str(c) for c in text_columns],
+            columns=changed or [str(c) for c in text_columns],
             affected_rows=extra,
             affected_share=share,
             message=(
