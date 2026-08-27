@@ -1,0 +1,11 @@
+# The closed dependency list. Adding anything here requires a decisions.md entry
+# first -- see PLAN.md, anti-drift rule 4.
+#
+# The задание names Pandas and NumPy for the data-processing logic and Streamlit
+# for the interface. openpyxl is what pandas uses to read .xlsx. pytest is for
+# tests. Nothing else does data work.
+pandas>=2.2
+numpy>=1.26
+streamlit>=1.40
+openpyxl>=3.1
+pytest>=8
