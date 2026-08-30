@@ -78,6 +78,10 @@ class CleanResult:
     applied: list[Applied]
     # Steps in the plan this module cannot perform yet. Named, not silently dropped.
     skipped: list[Step] = field(default_factory=list)
+    # Row labels from the *input* frame that landed in the test half. Kept so the
+    # evaluation can line the raw arm up against the same held-back rows - comparing
+    # two arms across two different test sets measures nothing.
+    test_ids: pd.Index = field(default_factory=lambda: pd.Index([]))
 
     @property
     def frame(self) -> pd.DataFrame:
@@ -108,6 +112,40 @@ class CleanResult:
 # ------------------------------------------------------------------------- split
 
 
+def holdout_mask(
+    frame: pd.DataFrame,
+    *,
+    target: str | None = None,
+    test_size: float = DEFAULT_TEST_SIZE,
+    seed: int = SEED,
+) -> np.ndarray:
+    """Which rows go to the test half, as a boolean mask over positions.
+
+    Separate from `split` because the evaluation needs to know *which* rows were held
+    back, so it can score the raw and the cleaned arm on the same ones. A comparison
+    across two different test sets measures nothing.
+    """
+    rng = np.random.default_rng(seed)
+    n = len(frame)
+    mask = np.zeros(n, dtype=bool)
+    if n < 2:
+        return mask
+
+    if target and target in frame.columns:
+        # Stratify: keep each class in the same proportion on both sides. Matters when
+        # a class is rare - an unstratified split of a 5% class can put almost all of
+        # it on one side.
+        labels = frame[target].astype("string").fillna("__missing__")
+        for _, positions in labels.groupby(labels).indices.items():
+            group = np.asarray(positions)
+            rng.shuffle(group)
+            mask[group[: int(round(len(group) * test_size))]] = True
+    else:
+        order = rng.permutation(n)
+        mask[order[: int(round(n * test_size))]] = True
+    return mask
+
+
 def split(
     frame: pd.DataFrame,
     *,
@@ -115,32 +153,10 @@ def split(
     test_size: float = DEFAULT_TEST_SIZE,
     seed: int = SEED,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Split into train and test, stratified on the target when there is one.
-
-    Plain numpy. Stratifying keeps each class in the same proportion on both sides,
-    which matters when a class is rare - an unstratified split of a 5% class can put
-    almost all of it on one side.
-    """
-    rng = np.random.default_rng(seed)
-    n = len(frame)
-    if n < 2:
+    """Split into train and test, stratified on the target when there is one."""
+    if len(frame) < 2:
         return frame.copy(), frame.iloc[0:0].copy()
-
-    if target and target in frame.columns:
-        test_positions: list[int] = []
-        labels = frame[target].astype("string").fillna("__missing__")
-        for _, positions in labels.groupby(labels).indices.items():
-            group = np.asarray(positions)
-            rng.shuffle(group)
-            take = int(round(len(group) * test_size))
-            test_positions.extend(group[:take].tolist())
-        test_index = np.sort(np.asarray(test_positions, dtype=int))
-    else:
-        order = rng.permutation(n)
-        test_index = np.sort(order[: int(round(n * test_size))])
-
-    mask = np.zeros(n, dtype=bool)
-    mask[test_index] = True
+    mask = holdout_mask(frame, target=target, test_size=test_size, seed=seed)
     train = frame.iloc[np.flatnonzero(~mask)].reset_index(drop=True)
     test = frame.iloc[np.flatnonzero(mask)].reset_index(drop=True)
     return train, test
@@ -171,7 +187,7 @@ def clean_column_names(frame: pd.DataFrame, params: dict) -> OpResult:
 def drop_empty_rows(frame: pd.DataFrame, params: dict) -> OpResult:
     keep = ~frame.isna().all(axis=1)
     return OpResult(
-        frame[keep].reset_index(drop=True), f"dropped {int((~keep).sum())} blank row(s)"
+        frame[keep], f"dropped {int((~keep).sum())} blank row(s)"
     )
 
 
@@ -180,7 +196,7 @@ def drop_rows(frame: pd.DataFrame, params: dict) -> OpResult:
     positions = [p for p in params.get("positions", []) if 0 <= p < len(frame)]
     if not positions:
         return OpResult(frame, "no matching rows")
-    out = frame.drop(index=frame.index[positions]).reset_index(drop=True)
+    out = frame.drop(index=frame.index[positions])
     return OpResult(out, f"dropped {len(positions)} row(s) at {positions}")
 
 
@@ -287,7 +303,7 @@ def replace_disguised_missing(frame: pd.DataFrame, params: dict) -> OpResult:
 
 def drop_duplicate_rows(frame: pd.DataFrame, params: dict) -> OpResult:
     before = len(frame)
-    out = frame.drop_duplicates(keep="first").reset_index(drop=True)
+    out = frame.drop_duplicates(keep="first")
     return OpResult(out, f"removed {before - len(out)} duplicate row(s)")
 
 
@@ -297,7 +313,7 @@ def drop_rows_missing_target(frame: pd.DataFrame, params: dict) -> OpResult:
     if not target or target not in frame.columns:
         return OpResult(frame, "no target column")
     keep = frame[target].notna()
-    out = frame[keep].reset_index(drop=True)
+    out = frame[keep]
     return OpResult(out, f"dropped {int((~keep).sum())} row(s) with no label")
 
 
@@ -434,7 +450,16 @@ def run(
                     before_cols, current.shape[1], outcome.cells_changed)
         )
 
-    train, test = split(current, target=target, test_size=test_size, seed=seed)
+    # Split by hand rather than through `split`, so the source row labels of the test
+    # half survive for the evaluation.
+    if len(current) < 2:
+        train, test = current.copy(), current.iloc[0:0].copy()
+        test_ids = current.index[:0]
+    else:
+        mask = holdout_mask(current, target=target, test_size=test_size, seed=seed)
+        test_ids = current.index[mask]
+        train = current.iloc[np.flatnonzero(~mask)].reset_index(drop=True)
+        test = current.iloc[np.flatnonzero(mask)].reset_index(drop=True)
 
     for step in post_steps:
         pair = POST_OPS.get(step.action)
@@ -457,7 +482,9 @@ def run(
                     before_cols, train.shape[1], cells, fitted)
         )
 
-    return CleanResult(train=train, test=test, applied=applied, skipped=skipped)
+    return CleanResult(
+        train=train, test=test, applied=applied, skipped=skipped, test_ids=test_ids
+    )
 
 
 def _rename_in_plan(steps: list[Step], mapping: dict[str, str]) -> None:
