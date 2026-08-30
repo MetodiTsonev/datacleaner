@@ -192,12 +192,20 @@ def drop_empty_rows(frame: pd.DataFrame, params: dict) -> OpResult:
 
 
 def drop_rows(frame: pd.DataFrame, params: dict) -> OpResult:
-    """Drop by position. Used for totals rows, which are identified positionally."""
-    positions = [p for p in params.get("positions", []) if 0 <= p < len(frame)]
-    if not positions:
+    """Drop named rows. Used for totals rows, which are identified by row label.
+
+    The checks report row *labels* from the frame as loaded. Treating them as positions
+    works only until an earlier step removes a row: the last row of a 262-row file is
+    label 261, but after one blank row goes it sits at position 260, and a positional
+    read either drops the wrong row or - because 261 is then out of range - silently
+    drops nothing and reports "no matching rows". The totals row then survives into the
+    cleaned data and becomes the maximum of every numeric column, which is the exact
+    harm the finding described.
+    """
+    wanted = [r for r in params.get("positions", []) if r in frame.index]
+    if not wanted:
         return OpResult(frame, "no matching rows")
-    out = frame.drop(index=frame.index[positions])
-    return OpResult(out, f"dropped {len(positions)} row(s) at {positions}")
+    return OpResult(frame.drop(index=wanted), f"dropped {len(wanted)} row(s): {wanted}")
 
 
 def parse_numeric(frame: pd.DataFrame, params: dict) -> OpResult:

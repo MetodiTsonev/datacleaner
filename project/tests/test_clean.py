@@ -355,3 +355,25 @@ def test_case_is_still_decided_by_count():
     assert normalise_categories(frame, {"columns": ["c"]}).frame["c"].tolist() == (
         ["US"] * 3
     )
+
+
+def test_drop_rows_still_finds_its_row_after_an_earlier_step_removed_one():
+    """The checks report row labels, not positions.
+
+    Regression: a blank row removed by an earlier step shifts every later position by
+    one. Read positionally, the last row's label falls out of range, drop_rows reports
+    "no matching rows", and the totals row it was meant to remove survives into the
+    cleaned data as the maximum of every numeric column.
+    """
+    frame = pd.DataFrame({"item": ["a", None, "b", "TOTAL"], "n": [1.0, None, 2.0, 3.0]})
+    after_blank = drop_empty_rows(frame, {}).frame
+    assert len(after_blank) == 3
+
+    result = drop_rows(after_blank, {"positions": [3]})  # label 3, now at position 2
+    assert "TOTAL" not in result.frame["item"].tolist(), result.detail
+    assert len(result.frame) == 2
+
+
+def test_drop_rows_ignores_a_label_that_is_already_gone():
+    frame = pd.DataFrame({"v": [1, 2, 3]})
+    assert drop_rows(frame, {"positions": [99]}).detail == "no matching rows"
