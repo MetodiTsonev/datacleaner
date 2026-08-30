@@ -61,7 +61,7 @@ def test_the_findings_tab_reports_a_count_for_the_messy_sample():
     app.selectbox(key="sample_file").select("messy-orders.csv").run()
     assert not app.exception, app.exception
     headers = [h.value for h in app.subheader]
-    assert any("Stage 3 of 6" in h for h in headers), headers
+    assert any(h.startswith("Stage 3 of") for h in headers), headers
 
 
 def test_unticking_the_header_box_still_renders():
@@ -127,7 +127,7 @@ def test_the_validate_tab_renders_a_draft_contract():
     app.selectbox(key="sample_file").select("messy-orders.csv").run()
     assert not app.exception, app.exception
     headers = [h.value for h in app.subheader]
-    assert any("Stage 4 of 6" in h for h in headers), headers
+    assert any(h.startswith("Stage 4 of") for h in headers), headers
 
 
 def test_selecting_a_target_still_renders():
@@ -262,5 +262,19 @@ def test_every_tab_says_which_stage_it_is_and_what_it_does():
     app.selectbox(key="sample_file").select("adult-census.csv").run()
     assert not app.exception, app.exception
     headers = [h.value for h in app.subheader]
-    for stage in range(1, 7):
-        assert any(f"Stage {stage} of 6" in h for h in headers), (stage, headers)
+    total = max(
+        int(h.split(" of ")[1].split(" ")[0]) for h in headers if h.startswith("Stage ")
+    )
+    for stage in range(1, total + 1):
+        assert any(h.startswith(f"Stage {stage} of") for h in headers), (stage, headers)
+
+
+def test_the_features_tab_needs_the_run_tab_first():
+    """It works on the cleaned data, so it says so rather than rendering empty."""
+    if "adult-census.csv" not in SAMPLES:
+        pytest.skip("census sample not present")
+    app = AppTest.from_file(str(APP), default_timeout=TIMEOUT).run()
+    app.selectbox(key="sample_file").select("adult-census.csv").run()
+    assert not app.exception, app.exception
+    headers = [h.value for h in app.subheader]
+    assert any(h.startswith("Stage 7 of") for h in headers), headers

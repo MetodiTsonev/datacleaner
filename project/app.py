@@ -22,6 +22,8 @@ from src.clean import as_table as clean_table
 from src.clean import run as run_plan
 from src.detect import as_table as findings_table
 from src.detect import detect, summarise
+from src.features import build as build_features
+from src.features import skew_table
 from src.loader import probe_header, read_table
 from src.plan import PRE_SPLIT
 from src.plan import as_table as plan_table
@@ -190,8 +192,10 @@ frame = load.frame
 findings_summary = summarise(findings)
 
 (
-    tab_data, tab_profile, tab_findings, tab_validate, tab_plan, tab_run
-) = st.tabs(["Data", "Profile", "Findings", "Validate", "Plan", "Run"])
+    tab_data, tab_profile, tab_findings, tab_validate, tab_plan, tab_run, tab_features
+) = st.tabs(
+    ["Data", "Profile", "Findings", "Validate", "Plan", "Run", "Features"]
+)
 
 
 def stage_header(number: int, title: str, plain: str, detail: str = "") -> None:
@@ -200,7 +204,7 @@ def stage_header(number: int, title: str, plain: str, detail: str = "") -> None:
     The tabs are stages of one pipeline, and reading them out of order makes no
     sense, so each says where it sits and what it is for in ordinary words.
     """
-    st.subheader(f"Stage {number} of 6 — {title}")
+    st.subheader(f"Stage {number} of 7 — {title}")
     st.markdown(f"**{plain}**")
     if detail:
         st.caption(detail)
@@ -613,10 +617,11 @@ with tab_run:
             )
 
     if repair_plan.steps:
-        result = run_plan(
+        cleaned_result = result = run_plan(
             frame, repair_plan, target=target,
             test_size=test_size, add_indicator=add_indicator, group_by=group_by,
         )
+        st.session_state["_cleaned"] = cleaned_result
         rsummary = result.summary()
 
         a, b, c, d = st.columns(4)
@@ -718,9 +723,103 @@ with tab_run:
             )
 
 
+with tab_features:
+    stage_header(
+        7, "Preparing it for a model",
+        "The clean table still is not something a model can read.",
+        "A model takes a rectangle of numbers. A clean table is full of dates, labels "
+        "and lopsided quantities. This turns them into numbers — and, like the "
+        "cleaning, everything is worked out from the training half only.",
+    )
+
+    cleaned = st.session_state.get("_cleaned")
+    if cleaned is None:
+        st.info("Open the **Run** tab first — this works on the cleaned data.", icon="⬅")
+    else:
+        opts = st.columns(5)
+        do_log = opts[0].checkbox("Straighten skew", value=True)
+        do_dates = opts[1].checkbox("Split dates", value=True)
+        do_encode = opts[2].checkbox("Encode labels", value=True)
+        do_scale = opts[3].checkbox("Rescale", value=True)
+        do_prune = opts[4].checkbox("Drop duplicates", value=True)
+
+        X, X_test, freport = build_features(
+            cleaned.train, cleaned.test, profile_frame(cleaned.train), target=target,
+            do_log=do_log, do_dates=do_dates, do_encode=do_encode,
+            do_scale=do_scale, do_prune=do_prune,
+        )
+        fs_summary = freport.summary()
+
+        a, b, c = st.columns(3)
+        a.metric("Columns in", fs_summary["columns_in"])
+        b.metric("Columns out", fs_summary["columns_out"])
+        c.metric("Rows", f"{len(X):,}")
+
+        st.markdown("**What was done**")
+        if freport.steps:
+            for step in freport.steps:
+                st.markdown(f"- {step}")
+        else:
+            st.caption("Nothing to do — every column was already a usable number.")
+
+        if freport.log_declined:
+            st.info(
+                "Tried and reverted: "
+                + "; ".join(f"**{c}** — {w}" for c, w in freport.log_declined.items())
+                + ".",
+                icon="↩",
+            )
+
+        if not skew_table(freport).empty:
+            st.markdown("**Skew, before and after**")
+            st.caption(
+                "A long right tail means most of the range belongs to a handful of "
+                "rows. Closer to zero is more symmetric."
+            )
+            st.dataframe(skew_table(freport), width="stretch", hide_index=True)
+
+        if freport.encoded:
+            st.markdown("**How each label column was turned into numbers**")
+            st.dataframe(
+                {
+                    "column": list(freport.encoded),
+                    "method": list(freport.encoded.values()),
+                },
+                width="stretch", hide_index=True,
+            )
+
+        if freport.dropped_correlated:
+            st.markdown("**Columns dropped for saying the same thing**")
+            st.dataframe(
+                {
+                    "kept": [a_ for a_, _, _ in freport.dropped_correlated],
+                    "dropped": [b_ for _, b_, _ in freport.dropped_correlated],
+                    "correlation": [c_ for _, _, c_ in freport.dropped_correlated],
+                },
+                width="stretch", hide_index=True,
+            )
+
+        st.markdown("**The matrix**")
+        st.dataframe(X.head(10), width="stretch")
+
+        e1, e2 = st.columns(2)
+        e1.download_button(
+            "Model-ready training matrix (CSV)",
+            X.to_csv(index=False).encode("utf-8"),
+            file_name=f"features-train-{load.name}", mime="text/csv", width="stretch",
+        )
+        if X_test is not None and len(X_test):
+            e2.download_button(
+                "Held-out test matrix (CSV)",
+                X_test.to_csv(index=False).encode("utf-8"),
+                file_name=f"features-test-{load.name}", mime="text/csv",
+                width="stretch",
+            )
+
+
 st.divider()
 st.caption(
-    "Stages 1–6 of 9 (loading, profiling, detection, validation, planning, "
+    "Stages 1–7 of 9 (loading, profiling, detection, validation, planning, "
     "cleaning). Anomaly capping, feature engineering and the before/after model "
     "check follow — see PLAN.md."
 )
