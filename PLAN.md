@@ -73,6 +73,9 @@ These are binding. The previous project ballooned because none of them existed.
    on. Recorded here rather than quietly revised. `finding.py` and `text.py` are also
    absent from the structure below, though both are explained in `writing/`.
 
+   `evaluate.py` is 189 against 160 (18% over) — under the threshold, recorded for
+   completeness.
+
    ① `checks.py` is the one accepted overrun, agreed explicitly on 2026-08-27 rather
    than quietly revised. It holds 21 independent check functions; ~40% of its lines are
    the user-facing messages that explain each finding, which are the product rather
@@ -292,8 +295,36 @@ That converts the honest caveat into your own measured finding.
 
 **Done when:** two AUC numbers appear in the app, and a test verifies the NumPy AUC
 against a hand-computed small case.
-**Writing:** `writing/04-implementation/07-evaluate.md`,
+**Writing:** `writing/04-implementation/08-evaluate.md`,
 `writing/05-results/01-evidence.md`.
+
+### Done, 2026-08-30 — with one prediction refuted
+
+`src/evaluate.py`, 189 code lines against 160 (18% over, under the 50% threshold). The
+pre-registration was written and committed before any evaluation code existed.
+
+**Result:** on the clean file the pipeline is **worse** by −0.0067 AUC, in 0 of 10
+splits positive — refuting pre-registered expectation 1, which is recorded as a
+contradiction rather than edited away. The advantage does rise with damage (+0.0017 /
++0.0022 / +0.0044 at 10/20/40%), and naive row-dropping collapses from 36,187 usable
+rows to **30**. Cause of the negative result was traced by ablation to the `log1p`
+transform on `capital_gain`, which is 91.7% zeros: it improves skew 11.77 → 3.10 and
+costs ~0.005 AUC at every damage level. Full numbers in `writing/05-results/01-evidence.md`.
+
+**Bug found and fixed during this step.** The row-dropping clean ops called
+`reset_index(drop=True)`, so the row labels used to align the two arms pointed at the
+wrong rows and the arms were scored on *different* test sets. The numbers looked
+plausible. `clean.CleanResult` now carries `test_ids`, and
+`test_both_arms_are_scored_on_the_same_held_out_rows` guards it — verified to fail when
+the bug is reintroduced. A second latent bug: `to_matrix` chose the positive class
+independently per frame, so a test half with one class would silently invert the score.
+
+**Open question for the author — do NOT resolve by looking at the AUC.** Should
+`log_skewed` decline on zero-inflated columns (say >90% zeros)? The statistical argument
+is that `log1p` does not fix zero inflation, only skew — the same reasoning already
+applied to `capital_loss` in step 7. If adopted, the evaluation is recomputed and both
+tables are shown. Deliberately not done as part of this step: see Р12 in
+`writing/decisions.md`.
 
 ## Step 9 — The Streamlit app
 
