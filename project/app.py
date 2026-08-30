@@ -22,6 +22,7 @@ from src.clean import as_table as clean_table
 from src.clean import run as run_plan
 from src.detect import as_table as findings_table
 from src.detect import detect, summarise
+from src.evaluate import sweep as corruption_sweep
 from src.features import build as build_features
 from src.features import skew_table
 from src.loader import probe_header, read_table
@@ -148,6 +149,19 @@ def _prepare(source: bytes | str, name: str, **options):
     return loaded, column_profiles, detect(loaded.frame, column_profiles, target=target)
 
 
+@st.cache_data(show_spinner="Training the before/after models...")
+def _evidence(source: bytes | str, name: str, target: str, shares: tuple[float, ...],
+              **options):
+    """The corruption sweep, cached. Slow enough to be worth not repeating."""
+    from io import BytesIO
+
+    handle = BytesIO(source) if isinstance(source, bytes) else source
+    if isinstance(handle, BytesIO):
+        handle.name = name
+    loaded = read_table(handle, **options)
+    return corruption_sweep(loaded.frame, target=target, shares=shares)
+
+
 read_options = {
     "has_header": has_header,
     "encoding": None if forced_encoding == "detect" else forced_encoding,
@@ -192,9 +206,10 @@ frame = load.frame
 findings_summary = summarise(findings)
 
 (
-    tab_data, tab_profile, tab_findings, tab_validate, tab_plan, tab_run, tab_features
+    tab_data, tab_profile, tab_findings, tab_validate, tab_plan, tab_run, tab_features,
+    tab_evidence,
 ) = st.tabs(
-    ["Data", "Profile", "Findings", "Validate", "Plan", "Run", "Features"]
+    ["Data", "Profile", "Findings", "Validate", "Plan", "Run", "Features", "Evidence"]
 )
 
 
@@ -204,7 +219,7 @@ def stage_header(number: int, title: str, plain: str, detail: str = "") -> None:
     The tabs are stages of one pipeline, and reading them out of order makes no
     sense, so each says where it sits and what it is for in ordinary words.
     """
-    st.subheader(f"Stage {number} of 7 — {title}")
+    st.subheader(f"Stage {number} of 8 — {title}")
     st.markdown(f"**{plain}**")
     if detail:
         st.caption(detail)
@@ -817,9 +832,113 @@ with tab_features:
             )
 
 
+with tab_evidence:
+    stage_header(
+        8, "Proving it was worth it",
+        "Everything so far judges its own work. This does not.",
+        "The checks count the faults the pipeline knows how to repair, so \"fewer "
+        "faults afterwards\" proves nothing on its own. The only honest question is "
+        "whether the data became more *useful*: one model, one set of rows held back "
+        "from the start, trained twice — once on the file as uploaded, once on the "
+        "cleaned version.",
+    )
+
+    if not target:
+        st.info(
+            "Pick a **column to predict** in the sidebar. Without something to "
+            "predict there is nothing to measure.", icon="⬅",
+        )
+    else:
+        st.caption(
+            f"Measured on **{target}**. The score is ROC AUC: the chance the model "
+            "ranks a random positive row above a random negative one. 0.5 is a coin "
+            "toss, 1.0 is perfect."
+        )
+        evidence_source = handle.getvalue() if hasattr(handle, "getvalue") else str(handle)
+        damage = st.checkbox(
+            "Also test on deliberately damaged copies of this file",
+            value=False,
+            help="Blanks out a share of the cells as '?' and -999, then repeats the "
+                 "whole comparison. Slower, but it shows whether the advantage grows "
+                 "with the mess.",
+        )
+        shares = (0.0, 0.1, 0.2, 0.4) if damage else (0.0,)
+        try:
+            table = _evidence(
+                evidence_source, getattr(handle, "name", str(handle)), target, shares,
+                **read_options,
+            )
+        except Exception as exc:  # noqa: BLE001 - shown, not swallowed
+            st.error(f"Could not run the comparison. {type(exc).__name__}: {exc}")
+            table = None
+
+        if table is not None and len(table) and not table["scored"].iloc[0]:
+            st.warning(
+                f"This column cannot be scored. {table['note'].iloc[0]}\n\n"
+                "A column to predict needs at least two values, each appearing often "
+                "enough to land on both sides of the split — an identifier or a "
+                "single-valued column cannot work.",
+                icon="⚠️",
+            )
+        elif table is not None and len(table):
+            first = table.iloc[0]
+            a, b, c = st.columns(3)
+            a.metric("As uploaded", f"{first['raw_auc']:.4f}")
+            b.metric("After the pipeline", f"{first['cleaned_auc']:.4f}",
+                     delta=f"{first['difference']:+.4f}")
+            c.metric("Rows held back", f"{int(first['raw_rows']):,} trained on")
+
+            if first["difference"] > 0.001:
+                st.success(
+                    f"The cleaned data scored {first['difference']:+.4f} higher on rows "
+                    "neither version was trained on.", icon="✅",
+                )
+            elif first["difference"] < -0.001:
+                st.warning(
+                    f"The cleaned data scored {first['difference']:+.4f} — *worse*. On an "
+                    "already-clean file that is a real possibility, and it is reported "
+                    "rather than hidden. See the note below.", icon="⚠️",
+                )
+            else:
+                st.info(
+                    "No measurable difference. On a file that was already clean there "
+                    "was little for the pipeline to repair.", icon="ℹ️",
+                )
+
+            if len(table) > 1:
+                st.markdown("**As the file gets messier**")
+                shown = table.rename(columns={
+                    "corruption": "Damaged cells",
+                    "raw_auc": "As uploaded",
+                    "cleaned_auc": "After the pipeline",
+                    "difference": "Difference",
+                    "naive_rows": "Rows left if you just delete incomplete ones",
+                }).drop(columns=["raw_rows", "cleaned_rows", "note", "scored"])
+                shown["Damaged cells"] = shown["Damaged cells"].map(lambda v: f"{v:.0%}")
+                st.dataframe(shown, width="stretch", hide_index=True)
+                st.caption(
+                    "The last column is the usual alternative — drop every row with a "
+                    "blank in it. It is the number that falls off a cliff."
+                )
+
+            with st.expander("What this measurement does and does not show"):
+                st.markdown(
+                    "- The held-back rows are chosen **before** anything is fitted, "
+                    "and the same rows are used for both sides. Two scores from two "
+                    "different sets of rows would compare nothing.\n"
+                    "- Everything learned — fill values, category lists, outlier "
+                    "bounds, the scaling — comes from the training half only.\n"
+                    "- One model and one file. A different model may rank the two "
+                    "differently.\n"
+                    "- The damage is simulated by us, so it is the kind of damage this "
+                    "tool expects. Real files fail in ways we did not think of.\n"
+                    "- A transformation can improve a statistic and still cost "
+                    "accuracy — that is a finding here, not a bug."
+                )
+
+
 st.divider()
 st.caption(
-    "Stages 1–7 of 9 (loading, profiling, detection, validation, planning, "
-    "cleaning). Anomaly capping, feature engineering and the before/after model "
-    "check follow — see PLAN.md."
+    "Loading, profiling, detection, validation, planning, cleaning, feature "
+    "engineering and the before/after model check — see PLAN.md."
 )

@@ -278,3 +278,42 @@ def test_the_features_tab_needs_the_run_tab_first():
     assert not app.exception, app.exception
     headers = [h.value for h in app.subheader]
     assert any(h.startswith("Stage 7 of") for h in headers), headers
+
+
+def test_the_evidence_tab_asks_for_a_target_before_measuring():
+    """Without a column to predict there is nothing to score, and it must say so."""
+    if "adult-census.csv" not in SAMPLES:
+        pytest.skip("census sample not present")
+    app = AppTest.from_file(str(APP), default_timeout=TIMEOUT).run()
+    app.selectbox(key="sample_file").select("adult-census.csv").run()
+    assert not app.exception, app.exception
+    assert any("column to predict" in i.value.lower() for i in app.info)
+
+
+def test_the_evidence_tab_shows_a_score_for_each_arm():
+    if "messy-orders.csv" not in SAMPLES:
+        pytest.skip("messy sample not present")
+    app = AppTest.from_file(str(APP), default_timeout=TIMEOUT).run()
+    app.selectbox(key="sample_file").select("messy-orders.csv").run()
+    app.selectbox(key="target_column").select("returned").run()
+    assert not app.exception, app.exception
+
+    labels = {m.label for m in app.metric}
+    assert {"As uploaded", "After the pipeline"} <= labels, labels
+    for metric in app.metric:
+        if metric.label in {"As uploaded", "After the pipeline"}:
+            assert 0.0 <= float(metric.value) <= 1.0, f"{metric.label}={metric.value}"
+
+
+def test_an_unscorable_target_is_explained_not_shown_as_a_blank():
+    """An identifier cannot be predicted, and "nan" with no explanation is worse than
+    no number at all."""
+    if "messy-orders.csv" not in SAMPLES:
+        pytest.skip("messy sample not present")
+    app = AppTest.from_file(str(APP), default_timeout=TIMEOUT).run()
+    app.selectbox(key="sample_file").select("messy-orders.csv").run()
+    app.selectbox(key="target_column").select("order_id").run()
+    assert not app.exception, app.exception
+
+    assert any("cannot be scored" in w.value for w in app.warning)
+    assert "As uploaded" not in {m.label for m in app.metric}
