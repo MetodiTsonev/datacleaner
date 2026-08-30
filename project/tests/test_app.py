@@ -317,3 +317,43 @@ def test_an_unscorable_target_is_explained_not_shown_as_a_blank():
 
     assert any("cannot be scored" in w.value for w in app.warning)
     assert "As uploaded" not in {m.label for m in app.metric}
+
+
+def test_the_report_can_be_downloaded_once_the_pipeline_has_run():
+    """The 'export a summary of what was done' requirement, checked in the app."""
+    if "messy-orders.csv" not in SAMPLES:
+        pytest.skip("messy sample not present")
+    app = AppTest.from_file(str(APP), default_timeout=TIMEOUT).run()
+    app.selectbox(key="sample_file").select("messy-orders.csv").run()
+    app.selectbox(key="target_column").select("returned").run()
+    assert not app.exception, app.exception
+
+    labels = [b.label for b in app.download_button]
+    assert "What was done (Markdown)" in labels, labels
+
+
+def test_the_report_is_offered_even_with_no_target_chosen():
+    """Without a target there is no measurement, but there is still a record."""
+    if "messy-orders.csv" not in SAMPLES:
+        pytest.skip("messy sample not present")
+    app = AppTest.from_file(str(APP), default_timeout=TIMEOUT).run()
+    app.selectbox(key="sample_file").select("messy-orders.csv").run()
+    assert not app.exception, app.exception
+    assert "What was done (Markdown)" in [b.label for b in app.download_button]
+
+
+def test_the_evidence_tab_states_a_verdict():
+    """Whatever the numbers, the tab must say what they mean, not just print them."""
+    if "messy-orders.csv" not in SAMPLES:
+        pytest.skip("messy sample not present")
+    app = AppTest.from_file(str(APP), default_timeout=TIMEOUT).run()
+    app.selectbox(key="sample_file").select("messy-orders.csv").run()
+    app.selectbox(key="target_column").select("returned").run()
+    assert not app.exception, app.exception
+
+    said = [e.value for e in (*app.success, *app.warning, *app.info)]
+    assert any(
+        phrase in text
+        for text in said
+        for phrase in ("scored", "No measurable difference", "coin toss")
+    ), said

@@ -22,7 +22,9 @@ from src.clean import as_table as clean_table
 from src.clean import run as run_plan
 from src.detect import as_table as findings_table
 from src.detect import detect, summarise
+from src.evaluate import as_table as evidence_table
 from src.evaluate import sweep as corruption_sweep
+from src.evaluate import verdict as evidence_verdict
 from src.features import build as build_features
 from src.features import skew_table
 from src.loader import probe_header, read_table
@@ -30,6 +32,7 @@ from src.plan import PRE_SPLIT
 from src.plan import as_table as plan_table
 from src.plan import build as build_plan
 from src.profile import as_table, profile_frame, type_counts
+from src.report import build as build_report
 from src.validate import (
     Rule,
     infer_rules,
@@ -484,6 +487,9 @@ with tab_validate:
     st.divider()
 
     result = validate(frame, rules)
+    # Kept for the report at the end. Streamlit runs the script top to bottom, so the
+    # Evidence tab below can read whatever the earlier tabs computed.
+    st.session_state["_validation"] = result
     vsummary = result.summary()
 
     a, b, c, d = st.columns(4)
@@ -763,6 +769,7 @@ with tab_features:
             do_log=do_log, do_dates=do_dates, do_encode=do_encode,
             do_scale=do_scale, do_prune=do_prune,
         )
+        st.session_state["_features"] = freport
         fs_summary = freport.summary()
 
         a, b, c = st.columns(3)
@@ -843,6 +850,7 @@ with tab_evidence:
         "cleaned version.",
     )
 
+    report_comparison = None
     if not target:
         st.info(
             "Pick a **column to predict** in the sidebar. Without something to "
@@ -864,10 +872,12 @@ with tab_evidence:
         )
         shares = (0.0, 0.1, 0.2, 0.4) if damage else (0.0,)
         try:
-            table = _evidence(
+            comparisons = _evidence(
                 evidence_source, getattr(handle, "name", str(handle)), target, shares,
                 **read_options,
             )
+            table = evidence_table(comparisons)
+            report_comparison = comparisons[0]
         except Exception as exc:  # noqa: BLE001 - shown, not swallowed
             st.error(f"Could not run the comparison. {type(exc).__name__}: {exc}")
             table = None
@@ -888,22 +898,12 @@ with tab_evidence:
                      delta=f"{first['difference']:+.4f}")
             c.metric("Rows held back", f"{int(first['raw_rows']):,} trained on")
 
-            if first["difference"] > 0.001:
-                st.success(
-                    f"The cleaned data scored {first['difference']:+.4f} higher on rows "
-                    "neither version was trained on.", icon="✅",
-                )
-            elif first["difference"] < -0.001:
-                st.warning(
-                    f"The cleaned data scored {first['difference']:+.4f} — *worse*. On an "
-                    "already-clean file that is a real possibility, and it is reported "
-                    "rather than hidden. See the note below.", icon="⚠️",
-                )
-            else:
-                st.info(
-                    "No measurable difference. On a file that was already clean there "
-                    "was little for the pipeline to repair.", icon="ℹ️",
-                )
+            # The judgement lives in evaluate.verdict() so each branch is testable;
+            # this only chooses how to show it.
+            kind, sentence = evidence_verdict(report_comparison)
+            {"better": st.success, "chance": st.warning, "worse": st.warning}.get(
+                kind, st.info
+            )(sentence, icon={"better": "✅", "chance": "⚠️", "worse": "⚠️"}.get(kind, "ℹ️"))
 
             if len(table) > 1:
                 st.markdown("**As the file gets messier**")
@@ -935,6 +935,31 @@ with tab_evidence:
                     "- A transformation can improve a statistic and still cost "
                     "accuracy — that is a finding here, not a bug."
                 )
+
+    st.divider()
+    st.markdown("**Take the whole record with you**")
+    st.caption(
+        "The cleaned CSV on its own is a table that looks fine and says nothing about "
+        "how it got that way. This is the account that goes next to it: how the file "
+        "was read, what was found, what was planned, what each step actually changed, "
+        "and what the measurement above does and does not show."
+    )
+    cleaned_for_report = st.session_state.get("_cleaned")
+    if cleaned_for_report is None:
+        st.info("Open the **Run** tab first — the record covers what was done.", icon="⬅")
+    else:
+        st.download_button(
+            "What was done (Markdown)",
+            build_report(
+                load, findings, repair_plan, cleaned_for_report,
+                target=target,
+                validation=st.session_state.get("_validation"),
+                features=st.session_state.get("_features"),
+                comparison=report_comparison,
+            ).encode("utf-8"),
+            file_name=f"report-{Path(load.name).stem}.md",
+            mime="text/markdown",
+        )
 
 
 st.divider()
