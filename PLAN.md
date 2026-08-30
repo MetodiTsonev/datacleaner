@@ -73,8 +73,11 @@ These are binding. The previous project ballooned because none of them existed.
    on. Recorded here rather than quietly revised. `finding.py` and `text.py` are also
    absent from the structure below, though both are explained in `writing/`.
 
-   `evaluate.py` is 189 against 160 (18% over) — under the threshold, recorded for
-   completeness.
+   `evaluate.py` is 218 against 160 (36% over) and `report.py` is 135 against 140 —
+   both under the threshold, recorded for completeness. **`app.py` is 810 against 350
+   (131% over)** and joins the unaccepted breaches above: much of it is the
+   per-stage explanatory text that is the point of the tool, but that is an
+   explanation, not an acceptance.
 
    ① `checks.py` is the one accepted overrun, agreed explicitly on 2026-08-27 rather
    than quietly revised. It holds 21 independent check functions; ~40% of its lines are
@@ -319,12 +322,12 @@ plausible. `clean.CleanResult` now carries `test_ids`, and
 the bug is reintroduced. A second latent bug: `to_matrix` chose the positive class
 independently per frame, so a test half with one class would silently invert the score.
 
-**Open question for the author — do NOT resolve by looking at the AUC.** Should
-`log_skewed` decline on zero-inflated columns (say >90% zeros)? The statistical argument
-is that `log1p` does not fix zero inflation, only skew — the same reasoning already
-applied to `capital_loss` in step 7. If adopted, the evaluation is recomputed and both
-tables are shown. Deliberately not done as part of this step: see Р12 in
-`writing/decisions.md`.
+**Answered, 2026-08-30 — leave it.** The question was whether `log_skewed` should
+decline on zero-inflated columns (>90% zeros), which would improve every number in the
+table. Decided **no**: the pipeline stays as it was before the measurement, and the
+negative result is reported. A pipeline that always helps proves only that it was tuned;
+one that measurably hurts on clean data, with the mechanism identified, shows
+understanding — and it is direct support for Р5. See Р12 in `writing/decisions.md`.
 
 ## Step 9 — The Streamlit app
 
@@ -338,7 +341,39 @@ Before/After → Evidence → Export**.
 
 **Done when:** the whole flow works in a browser from upload to export without touching
 the terminal.
-**Writing:** `writing/04-implementation/08-app.md`.
+**Writing:** `writing/04-implementation/09-app.md`.
+
+### Done, 2026-08-30
+
+Verified in a browser with an uploaded file the app had never seen (`customer-churn.csv`,
+418 rows, semicolon-delimited, European decimals, planted `?` / `-999` / duplicate
+block / case-inconsistent categories). Delimiter and header were detected without being
+told; detection found every planted defect, including exactly the 18 duplicate rows.
+
+Added `src/report.py` (135 lines against 140) for the missing half of the export
+requirement — the cleaned CSV plus **an account of what was done to it**: how the file
+was read, what was found, what was planned, what each step actually changed, what was
+skipped, and what the measurement does and does not show. It assembles only from
+existing `summary()` calls and may not compute a figure of its own.
+
+**Deviation from the tab list above, recorded rather than quietly made:** there is no
+separate Before/After or Export tab. Before/after lives in Run where the change happens,
+and each download sits where its artefact is produced (cleaned data in Run, model matrix
+in Features, the full report in Evidence). A tab containing only buttons makes the user
+navigate back to learn what they are downloading.
+
+**Two bugs found by writing the report.**
+
+1. `drop_rows` read the checks' row *labels* as *positions*. After an earlier step
+   removed a blank row, the totals row's label fell out of range, so the step reported
+   "no matching rows" and the totals row survived into the cleaned data — becoming the
+   maximum of every numeric column, the exact harm the finding described. Fixed to drop
+   by label (possible only because step 8 stopped the row-droppers renumbering).
+2. The Evidence tab showed a green tick for a `+0.0051` gain when **both** arms scored
+   below 0.5 — two models that each lose to a coin toss. The verdict logic moved to
+   `evaluate.verdict()` so every branch is unit-tested; in the view it could only be
+   tested when a sample file happened to land in the right case, which is a test that
+   cannot fail when it should.
 
 ## Step 10 — Consolidate
 
