@@ -21,6 +21,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from src.anomalies import apply_cap, fit_cap
 from src.loader import make_names_unique
 from src.plan import POST_SPLIT, PRE_SPLIT, Plan, Step
 from src.text import (
@@ -97,6 +98,10 @@ class CleanResult:
             "train_rows": len(self.train),
             "test_rows": len(self.test) if self.test is not None else 0,
             "nulls_remaining": int(self.train.isna().to_numpy().sum()),
+            "values_capped": sum(
+                a.cells_changed for a in self.applied
+                if a.step.action == "cap_outliers"
+            ),
         }
 
 
@@ -380,7 +385,10 @@ PRE_OPS = {
 }
 
 # Fitted operations: (fit on train, apply to both).
-POST_OPS = {"impute": (fit_impute, apply_impute)}
+POST_OPS = {
+    "impute": (fit_impute, apply_impute),
+    "cap_outliers": (fit_cap, apply_cap),
+}
 
 
 def run(

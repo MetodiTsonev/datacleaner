@@ -266,9 +266,9 @@ def test_an_all_null_column_is_left_alone_rather_than_guessed():
 # ------------------------------------------------------------------- the runner
 
 def test_unimplemented_steps_are_named_not_silently_skipped():
-    """cap_outliers and log_transform arrive in steps 6 and 7."""
+    """log_transform arrives in step 7. cap_outliers landed in step 6."""
     _, result = cleaned(CENSUS, target="income")
-    assert {s.action for s in result.skipped} == {"cap_outliers", "log_transform"}
+    assert {s.action for s in result.skipped} == {"log_transform"}
 
 
 @pytest.mark.skipif(not CENSUS.exists(), reason="census sample not present")

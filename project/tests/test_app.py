@@ -61,7 +61,7 @@ def test_the_findings_tab_reports_a_count_for_the_messy_sample():
     app.selectbox(key="sample_file").select("messy-orders.csv").run()
     assert not app.exception, app.exception
     headers = [h.value for h in app.subheader]
-    assert any("problem(s) found" in h for h in headers), headers
+    assert any("Stage 3 of 6" in h for h in headers), headers
 
 
 def test_unticking_the_header_box_still_renders():
@@ -127,7 +127,7 @@ def test_the_validate_tab_renders_a_draft_contract():
     app.selectbox(key="sample_file").select("messy-orders.csv").run()
     assert not app.exception, app.exception
     headers = [h.value for h in app.subheader]
-    assert any("Validation against declared rules" in h for h in headers), headers
+    assert any("Stage 4 of 6" in h for h in headers), headers
 
 
 def test_selecting_a_target_still_renders():
@@ -248,3 +248,19 @@ def test_the_run_tab_executes_the_plan_and_reports_each_step():
     metrics = {m.label: m.value for m in app.metric}
     assert metrics["Nulls remaining"] == "0"
     assert int(metrics["Cells changed"].replace(",", "")) > 6000
+
+
+def test_every_tab_says_which_stage_it_is_and_what_it_does():
+    """The tabs are stages of one pipeline and only make sense in order.
+
+    Added after the interface was reported as hard to follow: the tab labels alone
+    ("Profile", "Plan") say nothing about what happens or why it comes where it does.
+    """
+    if "adult-census.csv" not in SAMPLES:
+        pytest.skip("census sample not present")
+    app = AppTest.from_file(str(APP), default_timeout=TIMEOUT).run()
+    app.selectbox(key="sample_file").select("adult-census.csv").run()
+    assert not app.exception, app.exception
+    headers = [h.value for h in app.subheader]
+    for stage in range(1, 7):
+        assert any(f"Stage {stage} of 6" in h for h in headers), (stage, headers)

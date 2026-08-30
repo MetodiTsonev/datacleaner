@@ -244,8 +244,15 @@ and say plainly that we implement the simpler method and why.
   column, so the IQR rule flags 13.6% of rows and the count must not be read as an error
   count. A detector that disclaims its own rule is a strength — keep it.
 
-**Done when:** capping applied to `capital_gain` and `fnlwgt` with counts reported, and
-`hours_per_week` flagged as unreliable rather than silently "fixed".
+**Done when:** capping applied with counts reported, and `hours_per_week` flagged as
+unreliable rather than silently "fixed".
+
+**Criterion corrected 2026-08-30.** This originally named `capital_gain` as a column to
+cap. It is 91.7% zeros, so the quartiles collapse onto zero and all three rules
+correctly decline — the criterion was written before the data was examined. Capping
+lands on `age` and `fnlwgt`; `capital_gain`, `hours_per_week` and `education_num` are
+all refused, each for a different stated reason. The code is right and the plan was
+wrong, which is the first time round that way.
 **Writing:** finish `writing/02-theory/02-anomalies.md`, add
 `writing/04-implementation/05-anomalies.md`.
 

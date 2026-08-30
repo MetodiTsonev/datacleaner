@@ -192,10 +192,29 @@ findings_summary = summarise(findings)
 (
     tab_data, tab_profile, tab_findings, tab_validate, tab_plan, tab_run
 ) = st.tabs(["Data", "Profile", "Findings", "Validate", "Plan", "Run"])
+
+
+def stage_header(number: int, title: str, plain: str, detail: str = "") -> None:
+    """One line saying what this tab does, before any of the detail.
+
+    The tabs are stages of one pipeline, and reading them out of order makes no
+    sense, so each says where it sits and what it is for in ordinary words.
+    """
+    st.subheader(f"Stage {number} of 6 — {title}")
+    st.markdown(f"**{plain}**")
+    if detail:
+        st.caption(detail)
 repair_plan = build_plan(findings, target=target)
 
 
 with tab_data:
+    stage_header(
+        1, "Reading the file",
+        "Before anything can be judged, the file has to be read correctly.",
+        "A wrong delimiter, a missed header row or the wrong decimal mark turns good "
+        "data into nonsense without raising a single error. What was detected is "
+        "shown below so you can correct it.",
+    )
     rows, cols = frame.shape
     a, b, c = st.columns(3)
     a.metric("Rows", f"{rows:,}")
@@ -218,11 +237,13 @@ with tab_data:
 
 
 with tab_profile:
-    st.subheader("What is in each column")
-    st.caption(
-        "The **type** column is a semantic type inferred from the values, not the "
-        "storage dtype. It is what later stages branch on: a quantity gets a "
-        "median and a scale, a category gets a mode and an encoding."
+    stage_header(
+        2, "Working out what each column is",
+        "The system decides what kind of thing every column holds.",
+        "Not the storage format — the *meaning*. A quantity, a label, a date, an "
+        "identifier. This decides how the column gets repaired later: a quantity is "
+        "filled with a median and scaled, a label is filled with its commonest value "
+        "and encoded. Get this wrong and everything after it is wrong.",
     )
 
     counts = type_counts(profiles)
@@ -257,11 +278,14 @@ with tab_profile:
 
 
 with tab_findings:
-    st.subheader(f"{findings_summary['total']} problem(s) found")
-    st.caption(
-        "Each finding carries a suggested repair where the system knows one. A "
-        "finding with no repair is shown as such rather than hidden — some defects "
-        "need a human decision, and some rules cannot judge the column they ran on."
+    stage_header(
+        3, "Finding what looks wrong",
+        f"The system checked this file against 22 common problems and found "
+        f"{findings_summary['total']}.",
+        "This is the system's own opinion, from rules that apply to any table. Each "
+        "finding comes with a suggested repair where one is known. Where it is not, "
+        "the finding says so rather than hiding — some defects need a person to "
+        "decide, and some rules cannot judge the column they ran on.",
     )
 
     if not findings:
@@ -318,13 +342,13 @@ with tab_findings:
 
 
 with tab_validate:
-    st.subheader("Validation against declared rules")
-    st.caption(
-        "The **Findings** tab is discovery — the system deciding for itself what "
-        "looks wrong, from rules that apply to any table. This tab is validation: "
-        "checking the data against rules *you* declare. A rule carries information "
-        "the data does not — that an age cannot be negative, or that a city must be "
-        "one of five — so this is where your knowledge of the domain enters."
+    stage_header(
+        4, "Checking it against your rules",
+        "The previous tab is the system's opinion. This one is yours.",
+        "Here you declare what *must* be true — an age cannot be negative, a city has "
+        "to be one of five, an order number cannot repeat. The data cannot tell you "
+        "any of that; you know it. Rows that break a rule are set aside with the "
+        "reason, not deleted.",
     )
 
     # Draft rules are cached per file so editing them survives a rerun. Streamlit
@@ -487,12 +511,14 @@ with tab_validate:
 
 with tab_plan:
     psummary = repair_plan.summary()
-    st.subheader(f"{psummary['steps']} repair step(s), in order")
-    st.caption(
-        "Not a list of suggestions — an ordered sequence. The order is fixed and the "
-        "same for every file; it is a design decision, not something computed per "
-        "file. Everything before the split is incapable of learning from the data; "
-        "everything after it is fitted on the training half only."
+    stage_header(
+        5, "Deciding what to do, and in what order",
+        f"The findings become {psummary['steps']} repair(s), to run in this order.",
+        "Not a list of suggestions — a sequence. Order matters: tidy the column names "
+        "before anything refers to them, convert '?' to a real blank before trying to "
+        "fill blanks. Steps marked *before split* cannot learn anything from the data; "
+        "steps marked *after split* are calculated from the training half only, so the "
+        "held-back half never influences them.",
     )
 
     a, b, c, d = st.columns(4)
@@ -544,10 +570,12 @@ with tab_plan:
 
 
 with tab_run:
-    st.subheader("Run the plan")
-    st.caption(
-        "Each step reports what it actually changed. 'Applied 9 steps' is a claim; "
-        "'filled 6,465 cells in 3 columns, dropped 52 rows' is an account."
+    stage_header(
+        6, "Doing it, and showing the receipts",
+        "The plan runs, and every step says exactly what it changed.",
+        "'Applied 6 steps' is a claim. 'Nulled 6,465 values in 3 columns, removed 52 "
+        "duplicate rows, filled 6,456' is an account you can check. The cleaned data "
+        "and the held-back test half can be downloaded at the bottom.",
     )
 
     left, right = st.columns([2, 1])
@@ -597,7 +625,13 @@ with tab_run:
         b.metric("Columns out", rsummary["columns_out"],
                  delta=frame.shape[1] and rsummary["columns_out"] - frame.shape[1] or None)
         c.metric("Cells changed", f"{rsummary['cells_changed']:,}")
-        d.metric("Nulls remaining", rsummary["nulls_remaining"])
+        d.metric(
+            "Nulls remaining", rsummary["nulls_remaining"],
+            help=(
+                f"{rsummary['values_capped']:,} extreme value(s) were capped rather "
+                "than deleted."
+            ),
+        )
 
         st.markdown("**What each step did**")
         st.dataframe(clean_table(result), width="stretch", hide_index=True)
@@ -619,6 +653,25 @@ with tab_run:
         )
         learned_any = False
         for a_ in result.applied:
+            limits = a_.fitted.get("bounds") if a_.fitted else None
+            if limits:
+                learned_any = True
+                st.dataframe(
+                    {
+                        "column": list(limits),
+                        "kept between": [
+                            f"{low:g} and {high:g}" for low, high in limits.values()
+                        ],
+                    },
+                    width="stretch", hide_index=True,
+                )
+            refused = (a_.fitted or {}).get("refused") or {}
+            for column, why in refused.items():
+                st.info(
+                    f"**{column}** was not capped — {why}.",
+                    icon="🤚",
+                )
+
             fills = a_.fitted.get("fill_values") if a_.fitted else None
             if not fills:
                 continue

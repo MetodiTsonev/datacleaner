@@ -140,9 +140,12 @@ def _infer_type(
 ) -> tuple[str, str]:
     """Order matters: cheapest and most certain first."""
     if len(present) == 0:
-        return "empty", "every value is missing"
+        return "empty", "no values at all - the column is entirely empty"
     if distinct == 1:
-        return "constant", f"one value throughout: {present.iloc[0]!r}"
+        return "constant", (
+            f"every row says {present.iloc[0]!r} - a column that never changes cannot "
+            "tell you anything"
+        )
 
     if pd.api.types.is_bool_dtype(series):
         return "boolean", ""
@@ -159,8 +162,9 @@ def _infer_type(
         # cardinality is not the signal it appears to be.
         if distinct <= NUMERIC_CODE_HINT_DISTINCT and _is_integral(present):
             return "numeric", (
-                f"only {distinct} distinct whole numbers - check whether this is a "
-                "code rather than a quantity before averaging it"
+                f"only {distinct} different whole numbers. Treated as a quantity, but "
+                "check it is not really a code (a postcode, a category number) - "
+                "averaging a code is meaningless"
             )
         return "numeric", ""
     if pd.api.types.is_datetime64_any_dtype(series):
@@ -169,15 +173,17 @@ def _infer_type(
     text = as_text(present)
 
     if distinct == 2 and set(text.str.lower().unique()) in BOOLEAN_SETS:
-        return "boolean", f"two values: {sorted(text.unique())}"
+        return "boolean", f"only two possible answers: {sorted(text.unique())}"
 
     # Judge the real values only. A numeric column with a few "?" in it is numeric
     # with blanks, not categorical -- otherwise it gets mode-filled, not median-filled.
     real = real_values(present)
     n_disguised = len(text) - len(real)
+    tokens_found = sorted(set(text[~text.isin(real)].unique()))[:4]
     disguised_note = (
-        f"{n_disguised} value(s) look like disguised blanks and were ignored when "
-        "deciding the type"
+        f"{n_disguised} value(s) are placeholders rather than answers "
+        f"({', '.join(repr(t) for t in tokens_found)}), so they were set aside when "
+        "working out what kind of column this is"
         if n_disguised
         else ""
     )
@@ -215,10 +221,15 @@ def _infer_type(
     per_record = distinct / n_distinct_rows if n_distinct_rows else 0.0
     if per_record >= IDENTIFIER_MIN_DISTINCT_SHARE:
         return "identifier", (
-            f"{100 * per_record:.1f}% unique per distinct row - identifies rows "
-            "rather than describing them, so it must not become a feature"
+            f"nearly every row has its own value ({100 * per_record:.0f}% are "
+            "different), so this column names rows rather than describing them - like "
+            "an order number. It is kept out of the features: a model would learn the "
+            "numbering rather than anything real"
         )
-    return "categorical", f"high cardinality ({distinct} distinct values)"
+    return "categorical", (
+        f"{distinct} different values - a lot for a category, so check it is a label "
+        "and not free text or a code"
+    )
 
 
 def _looks_categorical(distinct: int, n_rows: int) -> bool:

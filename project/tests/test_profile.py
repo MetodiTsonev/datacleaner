@@ -99,7 +99,8 @@ def test_numbers_with_a_disguised_blank_are_still_numeric():
     values = [str(x) for x in range(100, 200)] + ["?", "?", "?"]
     profile = profile_column(pd.Series(values, name="price"))
     assert profile.semantic_type == "numeric"
-    assert "disguised" in profile.note
+    assert "placeholders" in profile.note
+    assert "'?'" in profile.note, "the note must name the values it means"
 
 
 def test_all_disguised_blanks_is_empty():
