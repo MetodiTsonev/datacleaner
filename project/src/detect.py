@@ -14,6 +14,7 @@ import pandas as pd
 from src.checks import CHECKS
 from src.finding import SEVERITIES, TOPICS, Finding, Suggestion
 from src.profile import ColumnProfile
+from src.text import string_columns
 
 __all__ = [
     "CHECKS",
@@ -41,6 +42,7 @@ def detect(
         target: the column to be predicted, when there is one. Findings that would
             modify it are rewritten -- see :func:`protect_target`.
     """
+    frame = string_columns(frame)
     duplicated = sorted({c for c in frame.columns if list(frame.columns).count(c) > 1})
     if duplicated:
         raise ValueError(

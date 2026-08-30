@@ -12,10 +12,11 @@ from __future__ import annotations
 import re
 import unicodedata
 
+import numpy as np
 import pandas as pd
 
 from src.finding import Finding, Suggestion
-from src.profile import ColumnProfile
+from src.profile import TEXT_LIKE, ColumnProfile
 from src.text import (
     disguised_values,
     normalise,
@@ -134,6 +135,7 @@ def check_numeric_sentinels(
         if profile.semantic_type != "numeric":
             continue
         values = pd.to_numeric(frame[profile.name], errors="coerce").dropna()
+        values = values[np.isfinite(values)]
         if len(values) < SENTINEL_MIN_COUNT * 2:
             continue
         low, high = float(values.min()), float(values.max())
@@ -490,6 +492,9 @@ def check_outliers(frame: pd.DataFrame, profiles: list[ColumnProfile]) -> list[F
         if profile.semantic_type != "numeric":
             continue
         values = pd.to_numeric(frame[profile.name], errors="coerce").dropna()
+        # Infinities make every quantile and deviation meaningless. They are reported
+        # by check_infinite_values; here they are simply not measurable.
+        values = values[np.isfinite(values)]
         if len(values) < 20:
             continue
 
@@ -595,6 +600,48 @@ def check_outliers(frame: pd.DataFrame, profiles: list[ColumnProfile]) -> list[F
     return findings
 
 
+def check_infinite_values(
+    frame: pd.DataFrame, profiles: list[ColumnProfile]
+) -> list[Finding]:
+    """Infinities in a numeric column - almost always a division by zero.
+
+    Not a measurement, and one of them turns the mean, standard deviation and skew
+    into NaN, so it silently poisons every statistic computed from the column.
+    """
+    findings = []
+    for profile in profiles:
+        count = int(profile.stats.get("n_infinite", 0))
+        if profile.semantic_type != "numeric" or not count:
+            continue
+        share = count / profile.n_rows if profile.n_rows else 0.0
+        findings.append(
+            Finding(
+                check="infinite_values",
+                severity="high",
+                topic="anomalies",
+                columns=[profile.name],
+                affected_rows=count,
+                affected_share=share,
+                message=(
+                    f"'{profile.name}' holds {count:,} infinite value(s) "
+                    f"({share:.2%}), usually the result of dividing by zero. An "
+                    "infinity is not a measurement, and one of them makes the mean, "
+                    "standard deviation and skew of the whole column undefined."
+                ),
+                evidence={"count": count},
+                suggestion=Suggestion(
+                    action="replace_disguised_missing",
+                    params={"columns": [profile.name], "replace_infinite": True},
+                    rationale=(
+                        "Turn them into nulls so they are imputed rather than "
+                        "averaged into the column."
+                    ),
+                ),
+            )
+        )
+    return findings
+
+
 def check_high_skew(frame: pd.DataFrame, profiles: list[ColumnProfile]) -> list[Finding]:
     """Skewed columns a log transform can straighten."""
     findings = []
@@ -602,7 +649,7 @@ def check_high_skew(frame: pd.DataFrame, profiles: list[ColumnProfile]) -> list[
         skew = profile.stats.get("skew")
         if profile.semantic_type != "numeric" or skew is None:
             continue
-        if abs(skew) < SKEW_THRESHOLD:
+        if not np.isfinite(skew) or abs(skew) < SKEW_THRESHOLD:
             continue
         values = pd.to_numeric(frame[profile.name], errors="coerce").dropna()
         can_log = bool(len(values)) and float(values.min()) >= 0
@@ -704,7 +751,7 @@ def check_numeric_in_text(
     """
     findings = []
     for profile in profiles:
-        if profile.semantic_type not in {"categorical", "text", "identifier"}:
+        if profile.semantic_type not in TEXT_LIKE:
             continue
         real = real_values(frame[profile.name])
         if real.empty:
@@ -754,7 +801,7 @@ def check_whitespace(frame: pd.DataFrame, profiles: list[ColumnProfile]) -> list
     to any encoder and two keys to any join, and look identical on screen."""
     findings = []
     for profile in profiles:
-        if profile.semantic_type in {"numeric", "empty", "datetime", "boolean"}:
+        if profile.semantic_type not in TEXT_LIKE:
             continue
         text = frame[profile.name].dropna().astype("string")
         if text.empty:
@@ -804,7 +851,7 @@ def check_short_values(
     """
     findings = []
     for profile in profiles:
-        if profile.semantic_type not in {"categorical", "text", "identifier"}:
+        if profile.semantic_type not in TEXT_LIKE:
             continue
         real = real_values(frame[profile.name])
         if len(real) < 10:
@@ -849,7 +896,7 @@ def check_encoding_damage(
     """
     findings = []
     for profile in profiles:
-        if profile.semantic_type in {"numeric", "empty", "datetime", "boolean"}:
+        if profile.semantic_type not in TEXT_LIKE:
             continue
         text = frame[profile.name].dropna().astype("string")
         if text.empty:
@@ -944,7 +991,7 @@ def check_control_characters(
     """Newlines and tabs inside cells. They shift columns on a CSV round-trip."""
     findings = []
     for profile in profiles:
-        if profile.semantic_type in {"numeric", "empty", "datetime", "boolean"}:
+        if profile.semantic_type not in TEXT_LIKE:
             continue
         text = frame[profile.name].dropna().astype("string")
         if text.empty:
@@ -1142,6 +1189,7 @@ CHECKS = (
     check_encoding_damage,
     check_mixed_date_formats,
     check_numeric_sentinels,
+    check_infinite_values,
     check_missing_values,
     check_mixed_types,
     check_uninformative_columns,

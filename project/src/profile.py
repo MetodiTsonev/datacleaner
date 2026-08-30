@@ -17,7 +17,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from src.text import as_text, plain, real_values
+from src.text import as_text, plain, real_values, string_columns
 
 # Below 1.0 so a mostly-numeric column with a few strays is still numeric - the
 # strays are a finding, not a reason to give up on the column.
@@ -52,6 +52,11 @@ BOOLEAN_SETS = (
     {"true", "false"}, {"yes", "no"}, {"y", "n"},
     {"1", "0"}, {"t", "f"}, {"да", "не"},
 )
+
+# The types a text-level check applies to. Constant and empty columns are excluded
+# deliberately: they get dropped as uninformative, so a finding about their spacing or
+# encoding is noise about a column that is on its way out.
+TEXT_LIKE = ("categorical", "text", "identifier")
 
 SEMANTIC_TYPES = (
     "empty", "constant", "boolean", "numeric", "datetime",
@@ -253,9 +258,14 @@ def _stats(present: pd.Series, semantic: str) -> dict[str, float]:
     """Stats, only where they mean something."""
     if semantic == "numeric":
         values = pd.to_numeric(present, errors="coerce").dropna()
+        # Infinities are not measurements, and one of them makes the mean, standard
+        # deviation and skew all NaN - which then reached the user as "strongly
+        # skewed (+nan)". Excluded here and reported by checks.check_infinite_values.
+        n_infinite = int(np.isinf(values).sum())
+        values = values[np.isfinite(values)]
         if values.empty:
-            return {}
-        return {
+            return {"n_infinite": float(n_infinite)} if n_infinite else {}
+        stats = {
             "min": float(values.min()),
             "max": float(values.max()),
             "mean": float(values.mean()),
@@ -265,6 +275,9 @@ def _stats(present: pd.Series, semantic: str) -> dict[str, float]:
             "skew": float(values.skew()) if len(values) > 2 else 0.0,
             "pct_zero": round(100.0 * float((values == 0).mean()), 2),
         }
+        if n_infinite:
+            stats["n_infinite"] = float(n_infinite)
+        return stats
     if semantic in {"text", "categorical"}:
         lengths = as_text(present).str.len()
         return {
@@ -281,7 +294,8 @@ def profile_frame(frame: pd.DataFrame) -> list[ColumnProfile]:
     everything downstream would fail with an error that says nothing useful.
     read_table makes names unique.
     """
-    labels = [str(c) for c in frame.columns]
+    frame = string_columns(frame)
+    labels = list(frame.columns)
     duplicated = sorted({c for c in labels if labels.count(c) > 1})
     if duplicated:
         raise ValueError(

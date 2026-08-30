@@ -231,3 +231,20 @@ def test_the_add_button_is_disabled_until_the_rule_is_complete():
     app.text_input(key="new_rule_min").set_value("0.01").run()
     add = [b for b in app.button if b.label == "Add rule"]
     assert add and not add[0].disabled
+
+
+def test_the_run_tab_executes_the_plan_and_reports_each_step():
+    if "adult-census.csv" not in SAMPLES:
+        pytest.skip("census sample not present")
+    app = AppTest.from_file(str(APP), default_timeout=TIMEOUT).run()
+    app.selectbox(key="sample_file").select("adult-census.csv").run()
+    app.selectbox(key="target_column").select("income").run()
+    assert not app.exception, app.exception
+
+    assert not [b for b in app.button if b.label == "Run"], (
+        "no Run button: it reran the script and st.tabs loses the active tab, so the "
+        "result was never visible"
+    )
+    metrics = {m.label: m.value for m in app.metric}
+    assert metrics["Nulls remaining"] == "0"
+    assert int(metrics["Cells changed"].replace(",", "")) > 6000

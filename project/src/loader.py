@@ -283,9 +283,12 @@ def read_table(
     if not has_header:
         result.frame.columns = [f"column_{i + 1}" for i in range(result.frame.shape[1])]
 
+    # Always assign, not just when something was renamed: pandas gives integer labels
+    # for numeric headers (a sheet with 2020, 2021, 2022 as columns), and profiles
+    # carry names as strings, so every later `frame[name]` lookup would raise KeyError.
     unique, renamed = make_names_unique([str(c) for c in result.frame.columns])
+    result.frame.columns = unique
     if renamed:
-        result.frame.columns = unique
         notes.append(
             f"Renamed {len(renamed)} duplicate column name(s) so each can be "
             f"addressed: {renamed}. Two columns with one name means one of them is "

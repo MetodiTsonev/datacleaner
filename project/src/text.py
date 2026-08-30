@@ -28,6 +28,22 @@ CURRENCY_MARKS = ("$", "€", "£", "лв", "lv", "BGN", "EUR", "USD", "%")
 _WHITESPACE = re.compile(r"\s+")
 
 
+def string_columns(frame: pd.DataFrame) -> pd.DataFrame:
+    """Frame whose column labels are all strings.
+
+    Profiles carry names as strings, so a frame with integer labels - which pandas
+    produces for numeric headers, a sheet with 2020, 2021, 2022 - makes every later
+    `frame[profile.name]` raise KeyError. Returns the frame unchanged when it is
+    already fine, so the common path copies nothing.
+    """
+    labels = [str(c) for c in frame.columns]
+    if labels == list(frame.columns):
+        return frame
+    out = frame.copy()
+    out.columns = labels
+    return out
+
+
 def as_text(series: pd.Series) -> pd.Series:
     """Non-null values as trimmed strings."""
     return series.dropna().astype("string").str.strip()

@@ -66,6 +66,13 @@ These are binding. The previous project ballooned because none of them existed.
 2. **Line budgets per module** are given below. Exceeding a budget by more than ~50% is a
    signal to stop and reconsider, not to keep going.
 
+   **Outstanding breaches, found in the audit of 2026-08-30 and NOT yet accepted:**
+   `loader.py` is 239 code lines against 90 (166% over) and `validate.py` is 316
+   against 200 (58% over). Both passed the "stop and reconsider" threshold without
+   being flagged, because the per-step reviews only checked the module being worked
+   on. Recorded here rather than quietly revised. `finding.py` and `text.py` are also
+   absent from the structure below, though both are explained in `writing/`.
+
    ① `checks.py` is the one accepted overrun, agreed explicitly on 2026-08-27 rather
    than quietly revised. It holds 21 independent check functions; ~40% of its lines are
    the user-facing messages that explain each finding, which are the product rather

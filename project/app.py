@@ -17,6 +17,9 @@ from pathlib import Path
 
 import streamlit as st
 
+from src.clean import DEFAULT_TEST_SIZE
+from src.clean import as_table as clean_table
+from src.clean import run as run_plan
 from src.detect import as_table as findings_table
 from src.detect import detect, summarise
 from src.loader import probe_header, read_table
@@ -125,25 +128,50 @@ with st.sidebar.expander("Advanced"):
 st.title("DataCleaner")
 
 
+@st.cache_data(show_spinner="Reading and checking the file...")
+def _prepare(source: bytes | str, name: str, **options):
+    """load -> profile -> detect, cached on the file and the options.
+
+    Keyed on the file's bytes for an upload and its path for a sample, so switching
+    files or changing an option recomputes and nothing else does.
+    """
+    from io import BytesIO
+
+    handle = BytesIO(source) if isinstance(source, bytes) else source
+    if isinstance(handle, BytesIO):
+        handle.name = name
+    target = options.pop("target", None)
+    loaded = read_table(handle, **options)
+    column_profiles = profile_frame(loaded.frame)
+    return loaded, column_profiles, detect(loaded.frame, column_profiles, target=target)
+
+
+read_options = {
+    "has_header": has_header,
+    "encoding": None if forced_encoding == "detect" else forced_encoding,
+    "delimiter": forced_delimiter or None,
+    "decimal": "," if decimal_mark.startswith(",") else ".",
+    "skip_rows": None if skip_rows < 0 else int(skip_rows),
+}
+
+st.sidebar.subheader("Target")
+
+# Read once cheaply just to list the columns for the target selector.
 try:
-    load = read_table(
-        handle,
-        has_header=has_header,
-        encoding=None if forced_encoding == "detect" else forced_encoding,
-        delimiter=forced_delimiter or None,
-        decimal="," if decimal_mark.startswith(",") else ".",
-        skip_rows=None if skip_rows < 0 else int(skip_rows),
+    _peek, _, _ = _prepare(
+        handle.getvalue() if hasattr(handle, "getvalue") else str(handle),
+        getattr(handle, "name", str(handle)),
+        **read_options,
+        target=None,
     )
-except Exception as exc:  # noqa: BLE001 - shown to the user rather than swallowed
+except Exception as exc:  # noqa: BLE001 - shown, not swallowed
+    st.title("DataCleaner")
     st.error(f"Could not read this file. {type(exc).__name__}: {exc}")
     st.stop()
 
-frame = load.frame
-
-st.sidebar.subheader("Target")
 target = st.sidebar.selectbox(
     "Column to predict (optional)",
-    ["— none —", *[str(c) for c in frame.columns]],
+    ["— none —", *[str(c) for c in _peek.frame.columns]],
     key="target_column",
     help=(
         "Naming it protects it: the target is never filled in, transformed or "
@@ -152,17 +180,18 @@ target = st.sidebar.selectbox(
 )
 target = None if target == "— none —" else target
 
-try:
-    profiles = profile_frame(frame)
-except ValueError as exc:
-    st.error(str(exc))
-    st.stop()
-findings = detect(frame, profiles, target=target)
+load, profiles, findings = _prepare(
+    handle.getvalue() if hasattr(handle, "getvalue") else str(handle),
+    getattr(handle, "name", str(handle)),
+    **read_options,
+    target=target,
+)
+frame = load.frame
 findings_summary = summarise(findings)
 
-tab_data, tab_profile, tab_findings, tab_validate, tab_plan = st.tabs(
-    ["Data", "Profile", "Findings", "Validate", "Plan"]
-)
+(
+    tab_data, tab_profile, tab_findings, tab_validate, tab_plan, tab_run
+) = st.tabs(["Data", "Profile", "Findings", "Validate", "Plan", "Run"])
 repair_plan = build_plan(findings, target=target)
 
 
@@ -514,8 +543,131 @@ with tab_plan:
             )
 
 
+with tab_run:
+    st.subheader("Run the plan")
+    st.caption(
+        "Each step reports what it actually changed. 'Applied 9 steps' is a claim; "
+        "'filled 6,465 cells in 3 columns, dropped 52 rows' is an account."
+    )
+
+    left, right = st.columns([2, 1])
+    with right:
+        test_size = st.slider(
+            "Test share", 0.1, 0.5, DEFAULT_TEST_SIZE, 0.05,
+            help="Held back and never used to compute a fill value.",
+        )
+        add_indicator = st.checkbox(
+            "Add was-missing columns",
+            help=(
+                "A 0/1 column recording which values were filled. Worth having when "
+                "the fact that something was missing may itself carry information."
+            ),
+        )
+        group_options = ["— none —"] + [
+            p.name for p in profiles if p.semantic_type in {"categorical", "boolean"}
+        ]
+        group_by = st.selectbox(
+            "Fill numbers by group", group_options,
+            help=(
+                "A median per group is closer to the truth than one global median, "
+                "when the grouping column actually predicts the value."
+            ),
+        )
+        group_by = None if group_by == "— none —" else group_by
+
+    with left:
+        if not repair_plan.steps:
+            st.info("Nothing to run — the plan is empty for this file.")
+        else:
+            st.caption(
+                f"Running {len(repair_plan.steps)} step(s). Changing an option above "
+                "re-runs them."
+            )
+
+    if repair_plan.steps:
+        result = run_plan(
+            frame, repair_plan, target=target,
+            test_size=test_size, add_indicator=add_indicator, group_by=group_by,
+        )
+        rsummary = result.summary()
+
+        a, b, c, d = st.columns(4)
+        a.metric("Rows out", f"{rsummary['rows_out']:,}",
+                 delta=f"-{rsummary['rows_removed']:,}" if rsummary["rows_removed"] else None)
+        b.metric("Columns out", rsummary["columns_out"],
+                 delta=frame.shape[1] and rsummary["columns_out"] - frame.shape[1] or None)
+        c.metric("Cells changed", f"{rsummary['cells_changed']:,}")
+        d.metric("Nulls remaining", rsummary["nulls_remaining"])
+
+        st.markdown("**What each step did**")
+        st.dataframe(clean_table(result), width="stretch", hide_index=True)
+
+        if result.skipped:
+            st.info(
+                "Not run yet: "
+                + ", ".join(f"`{s.action}`" for s in result.skipped)
+                + ". These arrive in the anomaly and feature stages.",
+                icon="🚧",
+            )
+
+        st.markdown("**What was learned, and from which half**")
+        st.caption(
+            "Every value below was computed from the training rows only. If it had "
+            "come from the whole file, the test half would have influenced the "
+            "training half's cleaning, and the evaluation would be optimistic in a "
+            "way that never shows up on new data."
+        )
+        learned_any = False
+        for a_ in result.applied:
+            fills = a_.fitted.get("fill_values") if a_.fitted else None
+            if not fills:
+                continue
+            learned_any = True
+            st.dataframe(
+                {
+                    "column": list(fills),
+                    "fill value": [
+                        # Not str(): a median of 463.65999999999997 is float noise,
+                        # not a value anyone chose.
+                        f"{v:g}" if isinstance(v, float) else str(v)
+                        for v in fills.values()
+                    ],
+                },
+                width="stretch", hide_index=True,
+            )
+        if not learned_any:
+            st.caption("No step in this plan learns anything from the data.")
+
+        st.divider()
+        st.markdown("**Before and after**")
+        cols = st.columns(2)
+        cols[0].caption(f"Before — {frame.shape[0]:,} x {frame.shape[1]}")
+        cols[0].dataframe(frame.head(12), width="stretch")
+        cols[1].caption(
+            f"After — train {len(result.train):,} x {result.train.shape[1]}"
+            + (f", test {len(result.test):,}" if result.test is not None else "")
+        )
+        cols[1].dataframe(result.train.head(12), width="stretch")
+
+        st.divider()
+        st.markdown("**Export**")
+        e1, e2 = st.columns(2)
+        e1.download_button(
+            "Cleaned training data (CSV)",
+            result.train.to_csv(index=False).encode("utf-8"),
+            file_name=f"clean-train-{load.name}", mime="text/csv", width="stretch",
+        )
+        if result.test is not None and len(result.test):
+            e2.download_button(
+                "Held-out test data (CSV)",
+                result.test.to_csv(index=False).encode("utf-8"),
+                file_name=f"clean-test-{load.name}", mime="text/csv", width="stretch",
+            )
+
+
 st.divider()
 st.caption(
-    "Stages 1–4 of 9 (loading, profiling, detection, validation). The repair plan, "
-    "cleaning, anomalies, features and the before/after check follow — see PLAN.md."
+    "Stages 1–6 of 9 (loading, profiling, detection, validation, planning, "
+    "cleaning). Anomaly capping, feature engineering and the before/after model "
+    "check follow — see PLAN.md."
 )
