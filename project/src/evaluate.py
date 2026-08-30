@@ -306,17 +306,62 @@ def sweep(
     target: str,
     shares: tuple[float, ...] = (0.0, 0.1, 0.2, 0.4),
     seed: int = 20260830,
-) -> pd.DataFrame:
-    """The same comparison at rising damage. One row per level.
+) -> list[Comparison]:
+    """The same comparison at rising damage, one entry per level.
 
     This is the experiment that decides the claim: if the difference is flat, the
     honest conclusion is that preparation did not measurably help; if it grows with the
     damage, the claim is conditional and we can say what it is conditional on.
     """
-    rows = []
-    for share in shares:
-        comparison = compare(frame, target=target, corruption=share, seed=seed)
-        rows.append({"corruption": share, **comparison.summary(),
-                     "scored": comparison.scored,
-                     "naive_rows": comparison.naive_rows})
-    return pd.DataFrame(rows)
+    return [
+        compare(frame, target=target, corruption=share, seed=seed) for share in shares
+    ]
+
+
+#: How much AUC difference is worth calling a difference at all. Below this the two
+#: arms are indistinguishable, and the honest word is "none", not a signed number.
+MEANINGFUL = 0.001
+
+
+def verdict(comparison: Comparison) -> tuple[str, str]:
+    """What to tell the reader, as (kind, sentence).
+
+    Lives here rather than in the interface so every branch can be tested. The order
+    matters: "worse than a coin toss" outranks "improved", because an improvement
+    between two models that both lose to guessing is not an improvement worth reporting.
+    """
+    if not comparison.scored:
+        return "unscorable", comparison.raw.note or "the comparison could not be run"
+
+    best = max(comparison.raw.auc, comparison.cleaned.auc)
+    difference = comparison.difference
+    if best < 0.5:
+        return "chance", (
+            f"Both scores are below 0.5, so neither model beats a coin toss on this "
+            f"column. The {difference:+.4f} difference between them is not worth "
+            "reading: either this column cannot be predicted from the others, or "
+            "there are too few rows."
+        )
+    if difference > MEANINGFUL:
+        return "better", (
+            f"The cleaned data scored {difference:+.4f} higher on rows neither "
+            "version was trained on."
+        )
+    if difference < -MEANINGFUL:
+        return "worse", (
+            f"The cleaned data scored {difference:+.4f} - worse. On an already-clean "
+            "file that is a real possibility, and it is reported rather than hidden."
+        )
+    return "same", (
+        "No measurable difference. On a file that was already clean there was little "
+        "for the pipeline to repair."
+    )
+
+
+def as_table(comparisons: list[Comparison]) -> pd.DataFrame:
+    """One row per damage level, for display."""
+    return pd.DataFrame([
+        {"corruption": c.corruption, **c.summary(),
+         "scored": c.scored, "naive_rows": c.naive_rows}
+        for c in comparisons
+    ])

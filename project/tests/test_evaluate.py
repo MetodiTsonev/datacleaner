@@ -218,3 +218,57 @@ def test_the_summary_rounds_to_four_places_for_display():
     )
     assert comparison.summary()["cleaned_auc"] == 0.9123
     assert comparison.summary()["difference"] == pytest.approx(0.0123, abs=1e-4)
+
+
+# ------------------------------------------------------------------ the verdict
+
+def _comparison(raw: float, cleaned: float, **kw) -> Comparison:
+    return Comparison(raw=Score(raw, 100, 5), cleaned=Score(cleaned, 100, 5),
+                      target="y", **kw)
+
+
+def test_a_clear_improvement_is_called_an_improvement():
+    kind, text = evaluate.verdict(_comparison(0.80, 0.83))
+    assert kind == "better"
+    assert "+0.0300" in text
+
+
+def test_a_clear_loss_is_reported_not_softened():
+    kind, text = evaluate.verdict(_comparison(0.83, 0.80))
+    assert kind == "worse"
+    assert "-0.0300" in text
+    assert "worse" in text
+
+
+def test_a_difference_too_small_to_mean_anything_is_called_none():
+    kind, text = evaluate.verdict(_comparison(0.8000, 0.8005))
+    assert kind == "same"
+    assert "No measurable difference" in text
+
+
+def test_a_gain_between_two_models_that_lose_to_a_coin_toss_is_not_an_improvement():
+    """The honesty case. 0.43 -> 0.44 is not progress, it is noise between two
+    models that are both worse than guessing."""
+    kind, text = evaluate.verdict(_comparison(0.4308, 0.4359))
+    assert kind == "chance", f"reported {kind!r} for two sub-chance scores"
+    assert "coin toss" in text
+
+
+def test_sub_chance_outranks_improvement_even_for_a_large_gain():
+    kind, _ = evaluate.verdict(_comparison(0.20, 0.45))
+    assert kind == "chance"
+
+
+def test_a_score_above_a_half_on_either_side_is_judged_normally():
+    assert evaluate.verdict(_comparison(0.51, 0.45))[0] == "worse"
+    assert evaluate.verdict(_comparison(0.45, 0.51))[0] == "better"
+
+
+def test_an_unscorable_comparison_returns_its_reason():
+    unscorable = Comparison(
+        raw=Score(float("nan"), 0, 0, "as uploaded: the column to predict is empty"),
+        cleaned=Score(float("nan"), 0, 0), target="y",
+    )
+    kind, text = evaluate.verdict(unscorable)
+    assert kind == "unscorable"
+    assert "empty" in text
