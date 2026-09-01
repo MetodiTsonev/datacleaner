@@ -126,6 +126,76 @@ Finished work worth reusing, all in the old repo:
   and report both scores. Without it you can only say the data *changed*, not that it
   *improved*. Someone will ask.
 
+### 6b. Learned while building *this* version (steps 1–10)
+
+Added 2026-09-01. These are the mistakes this project actually made, and the checks that
+caught them. They are also defence material: "here is a bug I found in my own work and
+how" answers a question no amount of clean code does.
+
+**A test that cannot fail is worse than no test.** This happened three times.
+
+- The fixture for "both evaluation arms use the same held-out rows" had no duplicate
+  rows, so the deduplication step never fired and the test passed with the bug
+  reintroduced.
+- The check for "don't celebrate a gain between two sub-chance models" only asserted
+  when a sample file happened to score below 0.5 — which none do.
+- The claim in Р13 that a test guards the dependency boundary was not true until the
+  test was written.
+
+**The habit that fixes it: put the bug back and watch the test fail.** If it passes, the
+test is decoration. Do this every time a test is written *for* a specific bug.
+
+**Move the judgement out of the view so it can be tested.** The "is this an
+improvement?" decision lived in `app.py`, where only a lucky sample file could exercise
+it. Moved to `evaluate.verdict()`, all six branches became directly testable — and the
+exported report, which had been wording its own verdict from the sign of the difference,
+stopped contradicting the page.
+
+**Two outputs of one tool must read the same source.** The app said "worse than a coin
+toss"; the report called the same number an improvement. Both now call `verdict()`.
+
+**Silent index renumbering breaks anything that refers to rows later.** Four cleaning
+steps called `reset_index(drop=True)`. Nothing depended on it until the evaluation needed
+to know which rows were held back — and because the labels still looked plausible
+(unique, ascending, in range) the two arms were scored on *different* test sets while
+producing believable numbers. The same root cause silently defeated the totals-row
+removal: labels read as positions, out of range after an earlier row was dropped, "no
+matching rows" reported, and the totals row survived into the cleaned data.
+
+**Inherited documents drift into lies.** `writing/figures.md` was marked *frozen* while
+describing the first project's LSH curves, `Operation` registry and MICE experiments.
+A stale document that looks authoritative is worse than a missing one. Re-read every
+inherited file against the current code before using it — the same class of error as Р8,
+where a requirement was taken from a summary instead of the задание.
+
+**Hand-drawn architecture diagrams are wrong almost immediately.** The module graph had
+*every arrow reversed*: a data-flow picture and an import graph look identical until
+compared with the source. It is now generated from the imports.
+
+**Verify by doing, not by asserting.** `RUNNING.md` was checked by making a clean copy of
+the tree, a fresh venv, and following it literally. That surfaced something no
+development environment could: pip resolves **pandas 3.0.5 / numpy 2.5.2** for a new
+reader, and all tests still pass. Likewise, every figure caption number was checked
+against `measurements.csv` — two were wrong, copied from a trial run.
+
+**Streamlit specifics worth not rediscovering.**
+- HTTP 200 proves nothing; exceptions render *inside* the page. Use `AppTest`.
+- `AppTest` is not sufficient either — it simulates a rerun on every interaction, which
+  a real `st.form` never does, so it cannot see form-batching bugs. Check the browser.
+- One name assigned both at module level and inside a `with tab:` block silently changes
+  meaning for every later tab. There is a test for this.
+- A button reruns the script and `st.tabs` loses the active tab, so the user is thrown
+  back to the first tab and never sees the result. Cache instead of using a button.
+
+**Write the expected result down before measuring it.** The pre-registration in
+`writing/05-results/01-evidence.md` was committed before the evaluation module existed.
+One of its three predictions was then **refuted** — and because it was already committed,
+recording the contradiction was the only honest option. That refuted prediction is now
+the most interesting result in Chapter 5. See Р12.
+
+**When the browser tooling disconnects**, `list_connected_browsers` then
+`select_browser` recovers it; a locked laptop drops the extension.
+
 ## 7. The honest finding from the old project's experiments
 
 Worth knowing, because it should shape what this project claims.
@@ -149,6 +219,10 @@ is both true and interesting. Claim more and it is refutable with your own numbe
 ```
 datacleaner/
 ├── HANDOFF.md          this file
+├── PLAN.md             the 11 steps, anti-drift rules, and what each step produced
+├── RUNNING.md          how to run it — verified from a clean tree
+├── BACKLOG.md          ideas deliberately not built (rule 5)
+├── scripts/figures.py  regenerates every plot and the module graph
 ├── project/            the code
 │   ├── src/            the pipeline
 │   ├── data/input/     drop CSV / XLSX here
@@ -159,7 +233,8 @@ datacleaner/
     ├── 02-theory/      one file per mandated topic
     ├── 03-design/      requirements, architecture
     ├── 04-implementation/  one explanation per module
-    ├── 05-results/     before/after numbers
-    ├── decisions.md    running log of "we chose A over B because…"
+    ├── 05-results/     before/after numbers, and the pre-registration
+    ├── figures/        the ten figures, Bulgarian captions, measurements.csv
+    ├── decisions.md    running log of "we chose A over B because…" (Р1–Р13)
     └── glossary.md     EN→BG terminology
 ```
