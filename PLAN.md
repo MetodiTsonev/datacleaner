@@ -385,6 +385,39 @@ navigate back to learn what they are downloading.
 
 **Done when:** `pytest` passes, the figures exist, and the README works for a stranger.
 
+### Done, 2026-08-30
+
+**Tests.** 336 pass. Added `tests/test_dependencies.py`, which walks the imports of every
+module in the system and fails on anything outside the closed list — rule 4 was a comment
+until something checked it. Verified it fails when a refused import is introduced.
+
+**Verified from scratch, not asserted.** A clean copy of the tree, a fresh venv, and
+`RUNNING.md` followed literally end to end. pip resolved **pandas 3.0.5 / numpy 2.5.2** —
+newer than the development environment — and all 336 tests still pass, which is a
+portability result the development venv could not have shown. `pip install -e "project[dev]"`
+correctly pulls in no matplotlib, scipy or scikit-learn.
+
+**figures.md was stale and has been rewritten.** The inherited version described the
+*first* project: LSH S-curves, the `Operation` ABC and registry, MICE via `pyampute`, the
+`agnews` corpus, a quality-vector radar — none of which exist here, all of which rule 7
+forbids. A document marked "frozen" that describes a different system is worse than a
+missing one: it reads as a decision already taken. Same class of error as Р8.
+
+**Ten figures produced.** Two Mermaid diagrams, five screenshots at a fixed 1440×723, and
+three plots from `scripts/figures.py` over 40 pipeline runs. Bulgarian captions in
+`writing/figures/captions.md`, each number checked against `measurements.csv` rather than
+from memory — two were wrong (taken from a 3-seed trial run) and were corrected, and the
+row count was aligned between the figure and the Chapter 5 table.
+
+**Figure 2 is generated from the code.** The hand-drawn first attempt had **every arrow
+reversed** — a data-flow picture and an import graph look identical until checked against
+the source. `scripts/figures.py` now reads the real imports, so the thesis cannot claim an
+architecture the code does not have.
+
+**matplotlib added** as an authoring-only dependency in an optional `figures` group, with
+Р13 recorded first as rule 4 requires. `tests/test_dependencies.py` fails if `src/` or
+`app.py` ever imports it.
+
 ## Step 11 — Thesis text
 
 Assemble chapters from `writing/`. Planned separately — it is the largest remaining

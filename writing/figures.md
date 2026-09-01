@@ -1,48 +1,76 @@
-# Figure list — frozen
+# Списък с фигури — замразен
 
-**Cap: 15 figures.** Figures cost ~0.25 days each end-to-end (generate → static export → font
-match → Bulgarian caption → numbered cross-reference). Deciding the list now prevents generating
-figures that never get used. **Nothing outside this list gets made without deleting something from it.**
+**Таван: 10 фигури.** Всяка фигура струва време не при създаването си, а при
+поддръжката: смяна на шрифт, ширина по шаблона на катедрата, български надпис,
+номерирана препратка. Списъкът се определя сега, за да не се произвеждат фигури, които
+после не влизат никъде. **Нищо извън този списък не се прави, без да се извади нещо от
+него.**
 
-Tables are *not* counted here and are cheap — prefer a table whenever a figure isn't clearly better.
+Таблиците **не** се броят тук и са евтини — предпочита се таблица винаги, когато
+фигурата не е явно по-добра.
 
 ---
 
-| # | Ch. | Figure | Type | Source | Status |
+## ⚠ Пренаписан на 2026-08-30
+
+Предишният вариант на този файл беше наследен от **първата версия на проекта** и описваше
+система, която тук не съществува: S-крива за LSH, `Operation` ABC с регистър, MICE с
+`pyampute`, корпусът `agnews`, радар на вектора на качеството. Всичко това е изрично
+**нереализирано** (виж правило 7 в `PLAN.md` и §4 в `HANDOFF.md`).
+
+Файл, озаглавен „замразен“, който описва друга система, е по-опасен от липсващ файл:
+той изглежда като решение, което вече е взето. Записва се като пример за същия клас
+грешка като Р8 — изискване, изведено от наследен документ вместо от текущото състояние.
+
+---
+
+| # | Гл. | Фигура | Вид | Източник | Състояние |
 |---|---|---|---|---|---|
-| 1 | 1 | ML life cycle / CRISP-DM with the data-preparation stage highlighted | diagram | drawn (Mermaid → SVG) | — |
-| 2 | 2 | Taxonomy of missing-data mechanisms (MCAR / MAR / MNAR) with a worked example per branch | diagram | drawn | — |
-| 3 | 2 | LSH S-curve family `1 − (1 − sʳ)ᵇ` for several (b, r) at fixed h = b·r, with s\* ≈ (1/b)^(1/r) marked | plot | computed, no data needed | — |
-| 4 | 3 | System architecture — modules and their dependencies | diagram | drawn | — |
-| 5 | 3 | Order of operations, showing **split before fit** and the quarantine branch | diagram | drawn | — |
-| 6 | 3 | UML class diagram — `Operation` ABC, the registry, and one concrete operation | diagram | drawn | — |
-| 7 | 4 | Streamlit — *Diagnose & Recommend* page (detected issues + ranked recommendations) | screenshot | app | — |
-| 8 | 4 | Streamlit — *Run & Compare* page (before/after, quality vector) | screenshot | app | — |
-| 9 | 4 | Operation-level provenance graph for one recipe run | diagram | Mermaid from run JSON | — |
-| 10 | 5 | Adult — missingness pattern matrix (disguised `?` values by column and pattern) | plot | `adult` | data ✅ |
-| 11 | 5 | **E1-M — CI coverage vs nominal 95%**: complete-case / mean / single `IterativeImputer` / MICE(m) | plot | `adult` + `pyampute` | data ✅ |
-| 12 | 5 | **E1-M — delta-adjustment sensitivity curve** with the tipping point marked | plot | `adult` | data ✅ |
-| 13 | 5 | **E1-D — precision / recall / PQ across (b, r)** vs exact-hash and sorted-neighbourhood baselines | plot | `agnews` + `jenga` | data ✅ |
-| 14 | 5 | **E1-D — candidate pairs and wall-clock vs n**, against the O(n²) baseline (log-log) | plot | `agnews` | data ✅ |
-| 15 | 5 | **E2 — downstream accuracy by data arm × model**, with the E2-FE ablation as a panel | plot | `adult` + `agnews` | data ✅ |
+| 1 | 3 | Осемте етапа на конвейера, с ясно означено **разделяне преди напасване** и къде свършва „структурно“ и започва „научено“ | схема | Mermaid | ✅ |
+| 2 | 3 | Карта на модулите в `src/` и зависимостите между тях | схема | Mermaid | ✅ |
+| 3 | 4 | Streamlit — раздел **Profile**: pandas отчита **0** липсващи стойности за файл с хиляди прикрити такива | екранна снимка | приложението | ✅ |
+| 4 | 4 | Streamlit — раздел **Findings**: намиранията по тежест, всяко с предложена поправка | екранна снимка | приложението | ✅ |
+| 5 | 4 | Streamlit — раздел **Plan**: подредените стъпки, с означена **изведената** стъпка за запълване | екранна снимка | приложението | ✅ |
+| 6 | 4 | Streamlit — раздел **Run**: какво е променила всяка стъпка (разписката) | екранна снимка | приложението | ✅ |
+| 7 | 5 | Streamlit — раздел **Evidence**: двете оценки и таблицата при нарастваща повреда | екранна снимка | приложението | ✅ |
+| 8 | 5 | Разлика в AUC спрямо дела повредени клетки, със спред от 10 разделяния | графика | `scripts/figures.py` | ✅ |
+| 9 | 5 | Използваеми редове: конвейерът срещу наивното изтриване, при нарастваща повреда (логаритмична ос) | графика | `scripts/figures.py` | ✅ |
+| 10 | 5 | `capital_gain` преди и след логаритмуване — фигурата, която обяснява отрицателния резултат | графика | `scripts/figures.py` | ✅ |
+
+Фигури 1–2 са схеми и не изискват данни. Фигури 3–7 са екранни снимки от работещото
+приложение. Фигури 8–10 се генерират от `scripts/figures.py`.
+
+**Всички десет са произведени на 2026-08-30.** Файловете са в `writing/figures/`,
+българските надписи — в `writing/figures/captions.md`. Числата, които стоят зад
+фигури 8–10, са записани в `writing/figures/measurements.csv` (40 изпълнения) — така
+всяка стойност в надписа може да бъде проверена, вместо да се вярва на графиката.
+
+Фигура 2 се **генерира от самия код**: `scripts/figures.py` прочита вносовете в `src/` и
+написва Mermaid файла. Първият вариант беше нарисуван на ръка и **всички стрелки бяха в
+обратна посока** — диаграма на потока от данни и диаграма на зависимостите изглеждат
+еднакво, докато човек не ги сравни с кода. Затова тя вече не се рисува.
 
 ---
 
-## Reserve list — only by substitution
+## Резервен списък — само чрез замяна
 
-These are worth making *if* something above is dropped. Ranked.
+1. **Праговете при извеждането на типовете** — къде колона се приема за категорийна, за
+   идентификатор, за дата. Таблица я покрива добре; фигура само ако разделът в Глава 4
+   се окаже труден за четене.
+2. **Разпределение на отхвърлените редове по правило** (раздел Validate). Заменя #4, ако
+   валидирането получи повече място в Глава 4, отколкото се предвижда сега.
+3. **Асиметрия преди/след по колони** — таблица е достатъчна и вече съществува в
+   приложението.
 
-1. **AG News vs BBC shingle-set size distribution** (median 33 vs 328 five-grams). Strong candidate
-   to promote — it converts the review's biggest methodological objection into a measured finding.
-   Would displace #10, which a table covers adequately.
-2. Cluster-size distribution after transitive closure (chaining evidence).
-3. `capital_gain` distribution before/after log transform (skew 11.89 → ~0).
-4. Quality-vector radar before/after — *presentational only*, no evidential value (see `review-01.md` C2).
+## Правила
 
-## Rules
-
-- **Every figure is generated by a committed script**, never by hand, so it can be regenerated after a bug fix.
-- Static export via `kaleido` — **verify it works on day 1**; it is a known breakage point.
-- Captions in Bulgarian, terminology per `docs/glossary.md`.
-- Fonts and figure width matched to the faculty template **before** generating the final set.
-- Colour must survive greyscale printing; do not encode meaning in hue alone.
+- **Всяка графика се произвежда от `scripts/figures.py`**, никога на ръка, за да може да
+  бъде регенерирана след поправка на грешка. Скриптът е в хранилището.
+- Екранните снимки се правят при **еднаква ширина на прозореца** и еднаква тема, за да
+  не се различават по размер на шрифта в текста.
+- Надписите са на **български**, терминологията — по `writing/glossary.md`. Екранът е на
+  английски; надписът обяснява какво се вижда. Това е начинът английски интерфейс да
+  стои коректно в българска дипломна работа.
+- Цветът трябва да оцелее при печат в сиво — значението не се носи само от цвят.
+- Шрифтът и ширината се съгласуват с шаблона на катедрата **преди** окончателното
+  генериране. Шаблонът все още не е получен; това остава блокиращо.

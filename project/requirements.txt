@@ -10,3 +10,8 @@ streamlit>=1.40
 openpyxl>=3.1
 pytest>=8
 ruff>=0.6
+
+# Not part of the system. Used only by scripts/figures.py to draw the thesis
+# figures; tests/test_dependencies.py fails if src/ or app.py ever imports it.
+# See Р13 in writing/decisions.md.
+matplotlib>=3.8

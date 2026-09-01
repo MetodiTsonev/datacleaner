@@ -1,0 +1,67 @@
+%% Фигура 2 — зависимости между модулите в src/.
+%% ГЕНЕРИРАН ФАЙЛ. Не се редактира на ръка: пресъздава се с
+%%   python scripts/figures.py
+%% Стрелка A --> B означава: A внася B.
+flowchart LR
+    subgraph ОСНОВА["основа"]
+        direction TB
+        finding["finding.py"]
+        text["text.py"]
+    end
+    subgraph ЧЕТЕНЕ["четене"]
+        direction TB
+        loader["loader.py"]
+        profile["profile.py"]
+    end
+    subgraph ОТКРИВАНЕ["откриване"]
+        direction TB
+        checks["checks.py"]
+        detect["detect.py"]
+        validate["validate.py"]
+    end
+    subgraph ПОПРАВЯНЕ["поправяне"]
+        direction TB
+        anomalies["anomalies.py"]
+        clean["clean.py"]
+        plan["plan.py"]
+    end
+    subgraph ПОДГОТОВКА["подготовка"]
+        direction TB
+        features["features.py"]
+    end
+    subgraph ДОКАЗАТЕЛСТВО["доказателство"]
+        direction TB
+        evaluate["evaluate.py"]
+        report["report.py"]
+    end
+
+    anomalies --> checks
+    checks --> finding
+    checks --> profile
+    checks --> text
+    clean --> anomalies
+    clean --> loader
+    clean --> plan
+    clean --> text
+    detect --> checks
+    detect --> finding
+    detect --> profile
+    detect --> text
+    evaluate --> clean
+    evaluate --> detect
+    evaluate --> features
+    evaluate --> plan
+    evaluate --> profile
+    features --> profile
+    plan --> finding
+    profile --> text
+    report --> clean
+    report --> detect
+    report --> evaluate
+    report --> features
+    report --> finding
+    report --> loader
+    report --> plan
+    report --> validate
+    validate --> profile
+    validate --> text

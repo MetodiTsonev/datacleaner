@@ -16,6 +16,9 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "ruff>=0.6"]
+# Thesis figures only, never imported by src/ or app.py. See Р13 in
+# writing/decisions.md, and tests/test_dependencies.py which enforces the boundary.
+figures = ["matplotlib>=3.8"]
 
 [tool.setuptools.packages.find]
 include = ["src*"]
